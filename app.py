@@ -168,8 +168,11 @@ const SecFilingsTab = ({ setMessage }) => {
                 <div className="mt-6 bg-gray-700 p-5 rounded-lg">
                     <h3 className="text-xl font-bold mb-3 text-yellow-200 border-b border-gray-600 pb-2">Analysis Summary</h3>
                     
-                    {/* Inject Analysis Content from LLM. */}
-                    <div className="analysis-content text-gray-300 mb-6" dangerouslySetInnerHTML={{ __html: filingData.text }} />
+                    {/* Inject Analysis Content from LLM. 
+                        Note: Due to parser issues, all custom CSS for p, ul, h3 tags in this output 
+                        has been removed. It will use browser defaults for structure.
+                    */}
+                    <div className="analysis-content text-gray-300 mb-6 space-y-4" dangerouslySetInnerHTML={{ __html: filingData.text }} />
                     
                     <h3 className="text-lg font-semibold mt-4 mb-2 text-gray-300">Cited Sources ({filingData.sources.length})</h3>
                     <ul className="space-y-1 text-sm">
@@ -726,25 +729,8 @@ const App = () => {
                 </main>
             </div>
 
-            {/* Global Style Block (Custom CSS with PURE PIXEL UNITS to avoid decimal errors) */}
+            {/* Global Style Block (Custom CSS - only scrollbar remaining, minimal syntax) */}
             <style>{`
-                /* Styles for LLM-generated Markdown content - all rem/decimals converted to px for parser stability */
-                .analysis-content p { margin-bottom: 16px; } /* 1rem */
-                .analysis-content ul { 
-                    list-style: disc; 
-                    margin-left: 24px; /* 1.5rem */
-                    padding-left: 0; 
-                    margin-top: 8px; /* 0.5rem */
-                }
-                .analysis-content ul li { margin-bottom: 8px; } /* 0.5rem */
-                .analysis-content h3 { 
-                    font-size: 20px; /* 1.25rem */
-                    font-weight: 700; 
-                    margin-top: 24px; 
-                    margin-bottom: 8px; 
-                    color: #fcd34d; /* yellow-300 */
-                }
-                
                 /* Custom Scrollbar Styles for the Lists */
                 .custom-scrollbar::-webkit-scrollbar {
                     width: 8px;
@@ -754,7 +740,7 @@ const App = () => {
                     border-radius: 10px;
                 }
                 .custom-scrollbar::-webkit-scrollbar-thumb {
-                    background: #34d399; /* green-400 for Watchlist */
+                    background: #34d399;
                     border-radius: 10px;
                 }
                 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
