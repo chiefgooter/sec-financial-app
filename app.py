@@ -3,39 +3,66 @@ import requests
 import json
 from time import sleep
 
-# --- Configuration ---
-# You MUST provide a User-Agent string that identifies your application and includes
-# an administrative contact email address. The SEC may block scripts that don't comply.
-# *** IMPORTANT: Replace 'YourAppName' and 'youremail@example.com' with your actual information. ***
+# --- Configuration & State ---
+# Initialize the user-agent headers. These will be updated from the sidebar inputs.
 HEADERS = {
-    'User-Agent': 'YourAppName / youremail@example.com',
+    'User-Agent': 'DefaultAppName / default@example.com', # SEC compliance placeholder
     'Accept-Encoding': 'gzip, deflate',
     'Host': 'data.sec.gov'
 }
 
+# --- CIK Lookup Function ---
+
+@st.cache_data(ttl=86400) # Cache CIK mapping for 24 hours
+def get_cik_from_ticker(ticker, headers):
+    """
+    Fetches the SEC company_tickers.json mapping file and looks up the CIK 
+    using a given stock ticker.
+    """
+    TICKER_TO_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
+    
+    try:
+        # Implementing a small delay to respect the SEC's rate limit
+        sleep(0.1) 
+        response = requests.get(TICKER_TO_CIK_URL, headers=headers)
+        response.raise_for_status()
+        ticker_data = response.json()
+        
+        ticker_upper = ticker.upper()
+        
+        # Iterate through the large JSON dictionary to find a match
+        for item in ticker_data.values():
+            if item['ticker'] == ticker_upper:
+                # Returns the CIK (which is the CIK string padded to 10 digits)
+                return str(item['cik_str']).zfill(10), item['title']
+
+        return None, None # Ticker not found
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching ticker mapping data: {e}")
+        return None, None
+
 # --- Core Data Fetching Function ---
 
-@st.cache_data(ttl=3600) # Cache the data for 1 hour to prevent excessive API calls
-def fetch_sec_company_facts(cik):
+@st.cache_data(ttl=3600) # Cache the facts data for 1 hour
+def fetch_sec_company_facts(cik, headers):
     """
     Fetches the company facts JSON data from the SEC EDGAR API for a given CIK.
-    Handles the required 10-digit padding for the CIK.
     """
-    # Ensure CIK is padded to 10 digits
-    padded_cik = str(cik).zfill(10)
-    
-    FACTS_URL = f'https://data.sec.gov/api/xbrl/companyfacts/CIK{padded_cik}.json'
+    FACTS_URL = f'https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json'
     
     # Implementing a small delay to respect the SEC's rate limit of 10 requests/second
     sleep(0.5) 
     
     try:
-        response = requests.get(FACTS_URL, headers=HEADERS)
-        response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+        response = requests.get(FACTS_URL, headers=headers)
+        response.raise_for_status() 
         return response.json()
     except requests.exceptions.HTTPError as e:
         if response.status_code == 404:
-            st.error(f"Error: Could not find data for CIK {cik}. Please check the CIK.")
+            st.error(f"Error: Could not find financial facts for CIK {cik}.")
+        elif response.status_code == 403:
+            st.error("Error 403 Forbidden: Check your User-Agent header (Application Name and Email) in the sidebar. The SEC may be blocking your request.")
         else:
             st.error(f"HTTP Error {response.status_code}: {e}")
         return None
@@ -45,12 +72,12 @@ def fetch_sec_company_facts(cik):
 
 # --- Data Analysis and Presentation Function ---
 
-def display_key_metrics(data):
+def display_key_metrics(data, ticker, company_name):
     """
     Analyzes and displays key US-GAAP metrics in a Streamlit interface.
     """
-    company_name = data.get('entityName', 'N/A')
-    st.subheader(f"Financial Summary for {company_name}")
+    
+    st.subheader(f"Financial Summary for {company_name} ({ticker})")
     
     # We are interested in standard US GAAP concepts
     us_gaap = data['facts'].get('us-gaap', {})
@@ -95,30 +122,54 @@ def main():
     )
     
     st.title("SEC EDGAR Financial Data Viewer")
-    st.markdown("Enter a company's CIK to retrieve structured financial data from their public filings.")
+    st.markdown("Search a company by **Stock Ticker** to retrieve structured financial data from their public filings.")
     
-    # Input for Central Index Key (CIK)
-    # Using Apple (320193) as the default example CIK
-    cik_input = st.text_input(
-        "Enter CIK (Central Index Key):", 
-        value="320193",
+    # --- Sidebar for SEC Compliance ---
+    st.sidebar.header("SEC Compliance (Required)")
+    st.sidebar.markdown(
+        "The SEC requires all API requests to include a identifying User-Agent. Please fill this out to ensure data fetching works."
+    )
+    
+    app_name = st.sidebar.text_input("Application Name:", value="MySECApp")
+    email = st.sidebar.text_input("Contact Email:", value="user@example.com")
+    
+    # Update global HEADERS based on sidebar input
+    HEADERS['User-Agent'] = f'{app_name} / {email}'
+    
+    st.sidebar.markdown("---")
+    
+    # --- Main Input ---
+    
+    # Input for Stock Ticker
+    ticker_input = st.text_input(
+        "Enter Stock Ticker:", 
+        value="AAPL",
         max_chars=10,
-        placeholder="e.g., 320193"
-    ).strip()
+        placeholder="e.g., TSLA, MSFT, AMZN"
+    ).strip().upper()
     
     if st.button("Fetch Data"):
-        if not cik_input.isdigit():
-            st.error("Please enter a valid numeric CIK.")
+        if not ticker_input:
+            st.error("Please enter a stock ticker.")
             return
 
-        with st.spinner(f"Fetching data for CIK {cik_input}..."):
-            # Fetch data
-            company_data = fetch_sec_company_facts(cik_input)
+        with st.spinner(f"Looking up CIK for {ticker_input}..."):
+            # 1. Lookup CIK from Ticker
+            cik, company_name = get_cik_from_ticker(ticker_input, HEADERS)
+            
+            if not cik:
+                st.error(f"Could not find a CIK for ticker: **{ticker_input}**.")
+                return
+
+        with st.spinner(f"Fetching financial facts for {company_name} (CIK: {cik})..."):
+            # 2. Fetch facts using the resolved CIK
+            company_data = fetch_sec_company_facts(cik, HEADERS)
             
             if company_data and 'facts' in company_data:
-                display_key_metrics(company_data)
+                # 3. Display metrics
+                display_key_metrics(company_data, ticker_input, company_name)
             elif company_data:
-                st.warning("Data found for this CIK, but structured US-GAAP financial facts were not available.")
+                st.warning("Data found for this CIK, but structured US-GAAP financial facts were not immediately available.")
 
         st.markdown("""
             ---
