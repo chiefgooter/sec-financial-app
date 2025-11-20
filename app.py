@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import json
+import pandas as pd
 from time import sleep
 
 # --- Configuration & State ---
@@ -45,7 +46,28 @@ def get_cik_data(ticker, headers):
         st.caption(f"Details: {e}")
         return None, None
 
-# --- Core Data Fetching Function ---
+# --- NEW: Filings Data Fetching Function ---
+
+@st.cache_data(ttl=3600) # Cache the filings data for 1 hour
+def fetch_company_filings(cik, headers):
+    """
+    Fetches the company's submission history (filings) from the SEC EDGAR API.
+    """
+    padded_cik = str(cik).zfill(10)
+    # This is the endpoint for fetching the full list of filings (submissions)
+    FILINGS_URL = f'https://data.sec.gov/api/filings/CIK{padded_cik}.json'
+    
+    sleep(0.5) 
+    
+    try:
+        response = requests.get(FILINGS_URL, headers=headers)
+        response.raise_for_status() 
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching filings list: {e}")
+        return None
+
+# --- Core Financial Facts Data Fetching Function ---
 
 @st.cache_data(ttl=3600) # Cache the facts data for 1 hour
 def fetch_sec_company_facts(cik, headers):
@@ -116,6 +138,62 @@ def display_key_metrics(data, identifier):
             else:
                 st.metric(label=display_name, value="N/A")
 
+# --- NEW: Filings Presentation Function ---
+
+def display_filings(filings_data, company_name):
+    """
+    Displays the recent company filings in an interactive Streamlit table.
+    """
+    st.markdown("---")
+    st.header(f"Recent Filings ({company_name})")
+
+    if not filings_data or 'filings' not in filings_data or 'recent' not in filings_data['filings']:
+        st.warning("No recent filings data available for this company.")
+        return
+
+    # Extract the 'recent' filings data structure
+    recent_filings = filings_data['filings']['recent']
+
+    # Create a DataFrame from the dictionary of lists
+    df = pd.DataFrame({
+        'Filing Type': recent_filings['type'],
+        'Filing Date': recent_filings['filingDate'],
+        'Report Date': recent_filings['reportDate'],
+        'Description': recent_filings['formDescription'],
+        # CIK and accession number are needed to construct the link later, but we'll hide them
+        'CIK': filings_data['cik'],
+        'Accession Number': recent_filings['accessionNumber']
+    })
+
+    # The SEC filing viewer link format (we construct the full link)
+    def create_sec_link(row):
+        # Base URL for the interactive data viewer
+        base_url = "https://www.sec.gov/ix?doc=/Archives/edgar/data/"
+        
+        # Accession number needs to have dashes removed for the link
+        acc_no_clean = row['Accession Number'].replace('-', '')
+        
+        # The structure is: base_url + CIK + / + AccessionNumberNoDash + / + AccessionNumber + Form + .htm
+        # For simplicity, we link to the submission details page which allows viewing the document
+        return f"https://www.sec.gov/Archives/edgar/data/{row['CIK']}/{acc_no_clean}/{row['Accession Number']}.txt"
+
+    # Add a column with the direct link to the filing document
+    df['Link'] = df.apply(create_sec_link, axis=1)
+
+    # Prepare the DataFrame for display (dropping helper columns, reordering)
+    df_display = df[['Filing Type', 'Filing Date', 'Description', 'Link']]
+    
+    st.dataframe(
+        df_display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Link": st.column_config.LinkColumn("View Filing", display_text="Open PDF/HTML")
+        }
+    )
+    st.caption("Note: 'View Filing' links to the full submission file on SEC EDGAR.")
+
+
 # --- Streamlit Main App Layout ---
 
 def main():
@@ -125,8 +203,8 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    st.title("SEC EDGAR Financial Data Viewer")
-    st.markdown("Use the CIK search for guaranteed results, or Ticker search for convenience (if the SEC service is running).")
+    st.title("SEC EDGAR Data Viewer")
+    st.markdown("Use the CIK search for guaranteed results. Ticker search relies on an often-unstable SEC mapping file.")
     
     # --- Sidebar for SEC Compliance ---
     st.sidebar.header("SEC Compliance (Required)")
@@ -134,8 +212,14 @@ def main():
         "The SEC requires all API requests to include a identifying User-Agent. Please fill this out to ensure data fetching works."
     )
     
-    app_name = st.sidebar.text_input("Application Name:", value="MySECApp")
-    email = st.sidebar.text_input("Contact Email:", value="user@example.com")
+    # Store compliance inputs in session state to persist them better across runs
+    if 'app_name' not in st.session_state:
+        st.session_state.app_name = "MySECApp"
+    if 'email' not in st.session_state:
+        st.session_state.email = "user@example.com"
+        
+    app_name = st.sidebar.text_input("Application Name:", key='app_name')
+    email = st.sidebar.text_input("Contact Email:", key='email')
     
     # Update global HEADERS based on sidebar input
     HEADERS['User-Agent'] = f'{app_name} / {email}'
@@ -167,11 +251,13 @@ def main():
         # Determine the search mode and validation
         target_cik = None
         display_identifier = ""
+        company_name = ""
         
         # Priority 1: Use CIK if provided
         if cik_input and cik_input.isdigit():
             target_cik = cik_input
             display_identifier = f"CIK: {target_cik}"
+            # We don't have the company name yet, so we'll fetch it later if available
         
         # Priority 2: Use Ticker lookup if CIK is empty
         elif ticker_input:
@@ -195,15 +281,27 @@ def main():
 
         # --- Data Fetching ---
         if target_cik:
-            with st.spinner(f"Fetching financial facts for CIK: {target_cik}..."):
-                # 2. Fetch facts using the resolved CIK
-                company_data = fetch_sec_company_facts(target_cik, HEADERS)
+            # --- 1. Fetch Filings Data (For company name and recent filings) ---
+            with st.spinner(f"Fetching filing history for CIK: {target_cik}..."):
+                filings_data = fetch_company_filings(target_cik, HEADERS)
+            
+            if filings_data:
+                # Use the name from the filings data, which is always available if the filing request succeeds
+                company_name = filings_data.get('name', 'N/A')
+                display_filings(filings_data, company_name)
+            else:
+                st.error("Could not fetch company filing history (required for the name and recent reports).")
+                return # Stop if we can't get basic company info
                 
-                if company_data and 'facts' in company_data:
-                    # 3. Display metrics
-                    display_key_metrics(company_data, display_identifier)
-                elif company_data:
-                    st.warning("Data found for this CIK, but structured US-GAAP financial facts were not immediately available.")
+            # --- 2. Fetch Structured Financial Facts Data ---
+            with st.spinner(f"Fetching structured financial facts for {company_name}..."):
+                company_data = fetch_sec_company_facts(target_cik, HEADERS)
+            
+            if company_data and 'facts' in company_data:
+                # 3. Display metrics
+                display_key_metrics(company_data, display_identifier)
+            elif company_data:
+                st.warning("Structured financial facts were not available for this period.")
 
         st.markdown("""
             ---
