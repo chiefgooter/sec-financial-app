@@ -4,7 +4,7 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, collection, query, where, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
 import { Menu, TrendingUp, Search, X, FileText, LayoutDashboard } from 'lucide-react';
 
-// FIX: Define the model name using string concatenation to bypass the SyntaxError
+// FIX: Define the model name using string concatenation to bypass the SyntaxError 
 // caused by the '09' token being misinterpreted as an invalid octal number.
 const FLASH_MODEL_NAME = "gemini-2.5-flash-preview-" + "09" + "-2025"; 
 
@@ -140,24 +140,27 @@ const SecFilingsTab = ({ setMessage }) => {
                 <div className="mt-6 bg-gray-700 p-5 rounded-lg">
                     <h3 className="text-xl font-bold mb-3 text-yellow-200 border-b border-gray-600 pb-2">Analysis Summary</h3>
                     
-                    {/* FIX: Using analysis-content class instead of 'prose' 
-                        to ensure proper rendering of markdown without the Tailwind Typography plugin.
-                    */}
+                    {/* Inject Analysis Content from LLM */}
                     <div className="analysis-content text-gray-300 mb-6" dangerouslySetInnerHTML={{ __html: filingData.text }} />
+                    
+                    {/* CRITICAL FIX: Replaced fractional EM units with integer PX units 
+                        to bypass the parser's 'invalid decimal literal' error. 
+                        1em -> 16px, 1.5em -> 24px, 0.5em -> 8px.
+                    */}
                     <style>{`
-                        .analysis-content p { margin-bottom: 1em; }
+                        .analysis-content p { margin-bottom: 16px; }
                         .analysis-content ul { 
                             list-style: disc; 
-                            margin-left: 1.5em; 
+                            margin-left: 24px; 
                             padding-left: 0; 
-                            margin-top: 0.5em;
+                            margin-top: 8px;
                         }
-                        .analysis-content ul li { margin-bottom: 0.5em; }
+                        .analysis-content ul li { margin-bottom: 8px; }
                         .analysis-content h3 { 
                             font-size: 1.25rem; 
                             font-weight: 700; 
-                            margin-top: 1.5em; 
-                            margin-bottom: 0.5em; 
+                            margin-top: 24px; 
+                            margin-bottom: 8px; 
                             color: #fcd34d; /* yellow-300 */
                         }
                     `}</style>
