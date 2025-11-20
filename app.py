@@ -168,11 +168,8 @@ const SecFilingsTab = ({ setMessage }) => {
                 <div className="mt-6 bg-gray-700 p-5 rounded-lg">
                     <h3 className="text-xl font-bold mb-3 text-yellow-200 border-b border-gray-600 pb-2">Analysis Summary</h3>
                     
-                    {/* Inject Analysis Content from LLM. 
-                        Note: Due to parser issues, all custom CSS for p, ul, h3 tags in this output 
-                        has been removed. It will use browser defaults for structure.
-                    */}
-                    <div className="analysis-content text-gray-300 mb-6 space-y-4" dangerouslySetInnerHTML={{ __html: filingData.text }} />
+                    {/* Inject Analysis Content from LLM. Using Tailwind utility classes for basic structure. */}
+                    <div className="analysis-content text-gray-300 mb-6 space-y-4 prose prose-invert max-w-none" dangerouslySetInnerHTML={{ __html: filingData.text }} />
                     
                     <h3 className="text-lg font-semibold mt-4 mb-2 text-gray-300">Cited Sources ({filingData.sources.length})</h3>
                     <ul className="space-y-1 text-sm">
@@ -496,8 +493,8 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
                         className="w-full p-3 mb-4 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-green-500 focus:border-green-500"
                     />
                     
-                    {/* Note: custom-scrollbar class relies on global styles in App component */}
-                    <div className="space-y-3 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                    {/* Replaced custom-scrollbar with standard overflow class */}
+                    <div className="space-y-3 h-[300px] overflow-y-auto pr-2">
                         {isLoading && <p className="text-center py-4 text-green-400">Searching...</p>}
                         {!isLoading && results.length === 0 && searchTerm.length > 0 && (
                             <p className="text-center py-4 text-gray-400">No results found. Try a different ticker or company.</p>
@@ -512,8 +509,8 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
                 <div className="bg-gray-800 p-6 rounded-xl shadow-2xl">
                     <h2 className="text-xl font-bold mb-4 text-indigo-300">My Watchlist ({watchlist.length})</h2>
                     
-                    {/* Note: custom-scrollbar class relies on global styles in App component */}
-                    <div className="space-y-3 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                    {/* Replaced custom-scrollbar with standard overflow class */}
+                    <div className="space-y-3 h-[300px] overflow-y-auto pr-2">
                         {!isAuthReady && (
                             <p className="text-center py-4 text-yellow-400 font-medium">
                                 Establishing secure database connection...
@@ -728,25 +725,8 @@ const App = () => {
                     {renderContent()}
                 </main>
             </div>
-
-            {/* Global Style Block (Custom CSS - only scrollbar remaining, minimal syntax) */}
-            <style>{`
-                /* Custom Scrollbar Styles for the Lists */
-                .custom-scrollbar::-webkit-scrollbar {
-                    width: 8px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-track {
-                    background: #374151;
-                    border-radius: 10px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-thumb {
-                    background: #34d399;
-                    border-radius: 10px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-                    background: #10b981; 
-                }
-            `}</style>
+            
+            {/* NO CUSTOM STYLE BLOCK */}
         </div>
     );
 };
