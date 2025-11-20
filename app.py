@@ -5,6 +5,8 @@ import pandas as pd
 from time import sleep
 from io import StringIO
 import re
+from datetime import date
+from dateutil.relativedelta import relativedelta
 
 # --- Configuration & State ---
 # Initialize the user-agent headers. These will be updated from the sidebar inputs.
@@ -19,7 +21,7 @@ if 'target_cik' not in st.session_state:
     st.session_state.target_cik = "320193" # Default CIK for Apple
 if 'master_filings_df' not in st.session_state:
     st.session_state.master_filings_df = pd.DataFrame()
-if 'loaded_index_key' not in st.session_state:
+if 'loaded_index_key' not in st.session_session_state:
     st.session_state.loaded_index_key = ""
 
 # --- CIK Lookup Function (Using Search API for Stability) ---
@@ -400,17 +402,20 @@ def main():
         )
         
         # --- Index Selection ---
-        st.subheader("Select Index Quarter")
+        st.subheader("1. Load Quarterly Index")
         
+        # Updated index options to be more current (assuming today is late 2025)
         index_options = {
+            "2025 Q3 (July - Sep)": (2025, 3),
+            "2025 Q2 (Apr - Jun)": (2025, 2),
+            "2025 Q1 (Jan - Mar)": (2025, 1),
+            "2024 Q4 (Oct - Dec)": (2024, 4),
             "2024 Q3 (July - Sep)": (2024, 3),
             "2024 Q2 (Apr - Jun)": (2024, 2),
-            "2024 Q1 (Jan - Mar)": (2024, 1),
-            "2023 Q4 (Oct - Dec)": (2023, 4),
         }
         
         selected_key = st.selectbox(
-            "Choose a Quarterly Master Index:",
+            "Choose a Quarterly Master Index (Contains all filings for that 3-month period):",
             options=list(index_options.keys()),
             index=0, 
             key='index_quarter_select'
@@ -431,20 +436,54 @@ def main():
         
         if not df.empty:
             
+            # Make sure 'Date Filed' is datetime for filtering
+            if df['Date Filed'].dtype != '<M8[ns]': # Check if not already datetime
+                 df['Date Filed'] = pd.to_datetime(df['Date Filed'])
+
             st.markdown("---")
-            st.subheader(f"Filings Found in Index: {len(df):,}")
-            st.caption(f"Currently displaying data for: **{st.session_state.loaded_index_key}**")
+            st.subheader(f"2. Filter Filings from Index ({st.session_state.loaded_index_key})")
             
-            # 1. Filtering controls
+            # --- 2.1 Date Range Filter (New Calendar Filter) ---
+            
+            # Determine min/max dates in the loaded DataFrame
+            min_date = df['Date Filed'].min().date()
+            max_date = df['Date Filed'].max().date()
+            
+            # Set default range to last 14 days or the full range if the index is old
+            today = date.today()
+            default_start = max(min_date, today - relativedelta(weeks=2))
+            default_end = max_date # Default end is the latest date in the loaded data
+
+            date_range = st.date_input(
+                f"Filter by Filing Date Range (Index Dates: {min_date} to {max_date}):",
+                value=[default_start, default_end],
+                min_value=min_date,
+                max_value=max_date,
+                key='master_date_range'
+            )
+            
+            df_filtered = df.copy()
+
+            if len(date_range) == 2:
+                start_date = pd.to_datetime(min(date_range))
+                # Add one day to the end date to include all filings on the end date
+                end_date = pd.to_datetime(max(date_range)) + pd.DateOffset(days=1)
+                
+                # Apply date filter
+                df_filtered = df[(df['Date Filed'] >= start_date) & (df['Date Filed'] < end_date)]
+            
+            st.caption(f"Filings matching the selected date range: {len(df_filtered):,}")
+
+            # --- 2.2 Content Filters (Form Type and Company Name) ---
             filter_cols = st.columns(2)
             
             # Filter by Form Type
-            all_forms = sorted(df['Form Type'].unique())
+            all_forms = sorted(df['Form Type'].unique()) # Use the original df to get all possible forms
             
-            # Set a more inclusive default to ensure *some* data shows if the common ones aren't in the sample
             default_forms = [f for f in ['10-K', '10-Q', '8-K', '4', 'S-1', 'D'] if f in all_forms]
             if not default_forms:
-                default_forms = all_forms[:5] # Default to the first 5 types if common ones aren't present
+                # If common forms aren't present in the master file, default to the top 5 types
+                default_forms = all_forms[:5]
             
             selected_forms = filter_cols[0].multiselect(
                 "Filter by Form Type:",
@@ -460,16 +499,20 @@ def main():
                 key='master_name_search'
             )
             
-            df_filtered = df[df['Form Type'].isin(selected_forms)]
+            # Apply Form Type Filter
+            df_filtered = df_filtered[df_filtered['Form Type'].isin(selected_forms)]
             
+            # Apply Company Name Filter
             if search_query:
-                # Use .str.lower() for case-insensitive search if company name is not fully capitalized
                 df_filtered = df_filtered[df_filtered['Company Name'].str.contains(search_query, case=False, na=False)]
 
-            # 2. Display Result
-            st.caption(f"Displaying up to 500 records. Total matching records: {len(df_filtered):,}")
+            # 3. Display Result
+            st.markdown("---")
+            st.subheader(f"3. Filtered Results")
+            st.caption(f"Displaying up to 500 records. Total matching records: **{len(df_filtered):,}**")
             
-            df_display = df_filtered.head(500)[['Company Name', 'Form Type', 'Date Filed', 'Link', 'CIK']].copy()
+            # Sort by date for recent visibility and limit for display
+            df_display = df_filtered.sort_values(by='Date Filed', ascending=False).head(500)[['Company Name', 'Form Type', 'Date Filed', 'Link', 'CIK']].copy()
             
             st.dataframe(
                 df_display,
@@ -481,7 +524,7 @@ def main():
                 }
             )
         else:
-             st.info("Click 'Load Filings' above to download a massive SEC quarterly index file for browsing.")
+             st.info("Click 'Load Filings' above to download a massive SEC quarterly index file for browsing. You must load the data before filtering.")
         
     # --- 3. CIK Lookup (Experimental) Tab ---
     with tab_lookup:
