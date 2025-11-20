@@ -12,31 +12,29 @@ HEADERS = {
     'Host': 'data.sec.gov'
 }
 
-# --- NEW: CIK Lookup Function ---
+# Initialize session state for CIK storage
+if 'target_cik' not in st.session_state:
+    st.session_state.target_cik = "320193" # Default CIK for Apple
+
+# --- CIK Lookup Function ---
 
 @st.cache_data(ttl=86400) # Cache CIK mapping for 24 hours to reduce load on SEC
 def get_cik_data(ticker, headers):
     """
     Attempts to fetch the CIK and company name from the SEC's official ticker file.
-    
-    NOTE: This lookup file is occasionally unavailable or the URL changes, 
-    which is why CIK input remains the most reliable method.
     """
-    # The official SEC endpoint for the ticker list
     TICKER_TO_CIK_URL = "https://www.sec.gov/files/company-tickers.json" 
     
     try:
-        sleep(0.1) # Respecting the SEC limit
+        sleep(0.1) 
         response = requests.get(TICKER_TO_CIK_URL, headers=headers)
         response.raise_for_status()
 
         ticker_data = response.json()
         ticker_upper = ticker.upper()
         
-        # The structure of this file is a dictionary where the key is a running index
         for item in ticker_data.values():
             if item['ticker'] == ticker_upper:
-                # Returns the CIK (padded to 10 digits) and the company title
                 return str(item['cik_str']).zfill(10), item['title']
         
         return None, None # Ticker not found
@@ -44,7 +42,7 @@ def get_cik_data(ticker, headers):
     except requests.exceptions.RequestException as e:
         # If the lookup file fails, we display a soft error and return None
         st.warning("⚠️ Ticker Lookup Service Down ⚠️")
-        st.error(f"Error: The SEC ticker lookup file is currently unavailable. Please enter the company's CIK manually below.")
+        st.error(f"Error: The SEC ticker lookup file is currently unavailable. Please enter the company's CIK manually.")
         st.caption(f"Details: {e}")
         return None, None
 
@@ -59,7 +57,6 @@ def fetch_sec_company_facts(cik, headers):
     padded_cik = str(cik).zfill(10)
     FACTS_URL = f'https://data.sec.gov/api/xbrl/companyfacts/CIK{padded_cik}.json'
     
-    # Implementing a small delay to respect the SEC's rate limit of 10 requests/second
     sleep(0.5) 
     
     try:
@@ -87,7 +84,6 @@ def display_key_metrics(data, identifier):
     company_name = data.get('entityName', 'N/A')
     st.subheader(f"Financial Summary for {company_name} ({identifier})")
     
-    # We are interested in standard US GAAP concepts
     us_gaap = data['facts'].get('us-gaap', {})
     
     metrics_to_find = {
@@ -104,18 +100,13 @@ def display_key_metrics(data, identifier):
         
         with cols[i]:
             if metric_data:
-                # Sort by date and take the most recent value
                 metric_data.sort(key=lambda x: x.get('end', '0'), reverse=True)
                 latest_metric = metric_data[0]
                 
                 value = latest_metric['val']
                 end_date = latest_metric['end']
                 
-                # Use Streamlit's metric component for a nice display
-                st.metric(
-                    label=display_name, 
-                    value=f"${value:,.0f}"
-                )
+                st.metric(label=display_name, value=f"${value:,.0f}")
                 st.caption(f"Period End: {end_date}")
             else:
                 st.metric(label=display_name, value="N/A")
@@ -129,42 +120,32 @@ def display_filings(data, company_name):
     st.markdown("---")
     st.header(f"Recent Filings ({company_name})")
 
-    # The filing history is nested inside the root of the company facts JSON
     filings_list = data.get('listFilings', [])
 
     if not filings_list:
         st.warning("No recent filings data available in the company facts file.")
         return
 
-    # Extract the necessary fields: type, date, accession number, description, CIK
     filings_for_df = []
     
-    # Iterate through the filings list. Each item in listFilings represents a submission.
     for filing in filings_list:
         filings_for_df.append({
             'Filing Type': filing.get('form', 'N/A'),
             'Filing Date': filing.get('filingDate', 'N/A'),
             'Description': filing.get('formDescription', 'N/A'),
-            'CIK': data.get('cik'), # CIK is at the root of the data
+            'CIK': data.get('cik'), 
             'Accession Number': filing.get('accessionNumber', 'N/A')
         })
 
     # Limit to the top 20 recent filings for a cleaner view
     df = pd.DataFrame(filings_for_df[:20])
 
-    # The SEC filing viewer link format (we construct the full link)
     def create_sec_link(row):
-        # Accession number needs to have dashes removed for the link
         acc_no_clean = row['Accession Number'].replace('-', '')
-        
-        # Link structure for the submission document:
-        # https://www.sec.gov/Archives/edgar/data/[CIK]/[AccessionNumberNoDash]/[AccessionNumber].txt
         return f"https://www.sec.gov/Archives/edgar/data/{row['CIK']}/{acc_no_clean}/{row['Accession Number']}.txt"
 
-    # Add a column with the direct link to the filing document
     df['Link'] = df.apply(create_sec_link, axis=1)
 
-    # Prepare the DataFrame for display (dropping helper columns, reordering)
     df_display = df[['Filing Type', 'Filing Date', 'Description', 'Link']]
     
     st.dataframe(
@@ -177,6 +158,36 @@ def display_filings(data, company_name):
     )
     st.caption("Note: 'View Filing' links to the full submission file on SEC EDGAR.")
 
+# --- CALLBACK FUNCTION FOR TICKET SEARCH ---
+def search_cik_callback(app_name, email):
+    """
+    Callback function executed when the 'Search CIK' button is pressed.
+    It performs the ticker lookup and updates st.session_state.target_cik.
+    """
+    ticker = st.session_state.ticker_input.strip().upper()
+    
+    if not ticker:
+        st.error("Please enter a Stock Ticker to search.")
+        st.session_state.target_cik = ""
+        return
+
+    # --- Compliance check ---
+    if app_name.strip() == "MySECApp" or email.strip() == "user@example.com":
+         st.warning("Please update the Application Name and Contact Email in the sidebar for SEC compliance.")
+
+    with st.spinner(f"Attempting ticker lookup for {ticker}..."):
+        # The get_cik_data function handles the error display if the SEC file is down
+        found_cik, company_name = get_cik_data(ticker, HEADERS)
+        
+        if found_cik:
+            st.session_state.target_cik = found_cik
+            st.success(f"CIK found for {company_name}: **{found_cik}**")
+        else:
+            st.session_state.target_cik = ""
+            # Error message is handled within get_cik_data if the file is down
+            if not company_name: # company_name will be None if the ticker wasn't in the file
+                 st.error(f"Could not find a CIK for ticker: {ticker}.")
+
 
 # --- Streamlit Main App Layout ---
 
@@ -188,7 +199,7 @@ def main():
     )
     
     st.title("SEC EDGAR Data Viewer")
-    st.markdown("Use the CIK search for guaranteed results. Ticker search relies on an often-unstable SEC mapping file.")
+    st.markdown("Search by Ticker to find the CIK, or search directly with the CIK.")
     
     # --- Sidebar for SEC Compliance ---
     st.sidebar.header("SEC Compliance (Required)")
@@ -210,78 +221,64 @@ def main():
     
     st.sidebar.markdown("---")
     
-    # --- Main Input Logic ---
-    
-    # 1. Input for CIK (Most reliable method)
-    st.header("Search by CIK (Recommended)")
-    cik_input = st.text_input(
-        "Enter CIK (Central Index Key):", 
-        value="320193", # Setting Apple's CIK as a default for easy testing
-        max_chars=10,
-        placeholder="e.g., 320193 for AAPL"
-    ).strip()
-    
-    # 2. Input for Ticker (Convenience method)
-    st.header("Search by Ticker")
+    # --- Ticker Search Section (New independent flow) ---
+    st.header("1. Search CIK by Ticker")
     ticker_input = st.text_input(
         "Enter Stock Ticker:", 
         value="",
         max_chars=10,
-        placeholder="e.g., TSLA, MSFT, AMZN"
+        placeholder="e.g., TSLA, MSFT, AMZN",
+        key='ticker_input' # Key to read input inside callback
     ).strip().upper()
-    
-    if st.button("Fetch Data"):
-        
-        # Determine the search mode and validation
-        target_cik = None
-        display_identifier = ""
-        company_name = ""
-        
-        # Priority 1: Use CIK if provided
-        if cik_input and cik_input.isdigit():
-            target_cik = cik_input
-            display_identifier = f"CIK: {target_cik}"
-        
-        # Priority 2: Use Ticker lookup if CIK is empty
-        elif ticker_input:
-            # --- Compliance check when using Ticker lookup (which hits the SEC file) ---
-            if app_name.strip() == "MySECApp" or email.strip() == "user@example.com":
-                 st.warning("Please update the Application Name and Contact Email in the sidebar for SEC compliance.")
 
-            with st.spinner(f"Attempting ticker lookup for {ticker_input}..."):
-                # 1. Lookup CIK from Ticker
-                target_cik, company_name = get_cik_data(ticker_input, HEADERS)
-                
-                if target_cik:
-                    display_identifier = f"Ticker: {ticker_input}"
-                else:
-                    # If target_cik is None, an error/warning has already been displayed inside get_cik_data
-                    st.error(f"Could not find a CIK for ticker: {ticker_input}.")
-                    return
+    # The search button triggers the callback to update st.session_state.target_cik
+    st.button(
+        "Search CIK", 
+        on_click=search_cik_callback, 
+        args=(app_name, email)
+    )
+    
+    st.markdown("---")
+
+    # --- CIK Input Section (Now linked to session state) ---
+    st.header("2. Fetch Data by CIK")
+    # This CIK input now uses the value stored in session state, which gets updated by the ticker search
+    cik_input = st.text_input(
+        "Central Index Key (CIK):", 
+        value=st.session_state.target_cik, 
+        max_chars=10,
+        placeholder="e.g., 320193",
+        key='cik_input_final' # Unique key for the final input box
+    ).strip()
+    
+    if st.button("Fetch Financials & Filings"):
         
-        else:
-            st.error("Please enter either a Stock Ticker or a CIK to search.")
+        target_cik = cik_input
+        
+        if not target_cik.isdigit():
+            st.error("Please enter a valid numeric CIK to fetch data.")
             return
 
         # --- Data Fetching ---
-        if target_cik:
-            # --- Fetch Structured Financial Facts & Filings Data in one go ---
-            with st.spinner(f"Fetching complete data set for CIK: {target_cik}..."):
-                # This single call now gets both the facts and the filings list
-                company_data = fetch_sec_company_facts(target_cik, HEADERS)
+        # --- Fetch Structured Financial Facts & Filings Data in one go ---
+        with st.spinner(f"Fetching complete data set for CIK: {target_cik}..."):
+            company_data = fetch_sec_company_facts(target_cik, HEADERS)
+        
+        if company_data:
+            # Use the name from the facts data
+            company_name = company_data.get('entityName', 'N/A')
             
-            if company_data:
-                # Use the name from the facts data
-                company_name = company_data.get('entityName', 'N/A')
-                
-                # 1. Display Filings (extracted from company_data)
-                display_filings(company_data, company_name)
-                
-                # 2. Display Metrics (extracted from company_data)
-                if 'facts' in company_data:
-                    display_key_metrics(company_data, display_identifier)
-                else:
-                    st.warning("Structured financial facts were not available for this period.")
+            # Identifier is the CIK here, as it's the most reliable identifier used for the fetch
+            display_identifier = f"CIK: {target_cik}"
+            
+            # 1. Display Filings (extracted from company_data)
+            display_filings(company_data, company_name)
+            
+            # 2. Display Metrics (extracted from company_data)
+            if 'facts' in company_data:
+                display_key_metrics(company_data, display_identifier)
+            else:
+                st.warning("Structured financial facts were not available for this period.")
 
         st.markdown("""
             ---
