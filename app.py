@@ -41,16 +41,24 @@ def get_cik_data(ticker, headers):
 
         # The response is HTML/XML, not JSON. We must parse it.
         import re
+        found_cik = None
         
-        # --- ROBUST CIK EXTRACTION ---
-        # Look for the CIK number, which is always a 10-digit number following 'CIK'
-        # This is less dependent on the exact HTML anchor structure.
-        # It searches for: CIK followed by whitespace/non-digit chars, and then the 10-digit number.
-        cik_match = re.search(r'CIK[^0-9]*(\d{10})', response.text)
+        # --- ROBUST CIK EXTRACTION (Attempt 1: CIK label) ---
+        # Search for 'CIK:' followed by any characters, followed by the 10-digit number.
+        # This is the most common and robust pattern in the company detail table.
+        cik_match_1 = re.search(r'CIK:[^>]*?(\d{10})', response.text)
         
-        if cik_match:
-            found_cik = cik_match.group(1)
+        if cik_match_1:
+            found_cik = cik_match_1.group(1)
             
+        # --- ROBUST CIK EXTRACTION (Attempt 2: Direct URL link) ---
+        # If the first search fails, look for the CIK embedded in a direct data path (e.g., /edgar/data/0001045810/)
+        if not found_cik:
+             cik_match_2 = re.search(r'/edgar/data/(\d{10})/', response.text)
+             if cik_match_2:
+                found_cik = cik_match_2.group(1)
+        
+        if found_cik:
             # Since the search API doesn't easily return the clean name, 
             # we'll use a placeholder and let the companyfacts API fill in the name later.
             return found_cik, f"Ticker Search: {ticker}" 
