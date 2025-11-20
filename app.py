@@ -175,7 +175,7 @@ const SecFilingsTab = ({ setMessage }) => {
                     <ul className="space-y-1 text-sm">
                         {filingData.sources.map((source, index) => (
                             <li key={index} className="flex items-start">
-                                {/* FIX: Replaced the literal '•' with the HTML entity '&bull;' */}
+                                {/* Using &bull; entity for maximum parser compatibility */}
                                 <span className="text-yellow-400 mr-2 flex-shrink-0" dangerouslySetInnerHTML={{ __html: '&bull;' }} />
                                 <a 
                                     href={source.uri} 
@@ -710,11 +710,15 @@ const App = () => {
                 <main className="flex-1 overflow-y-auto">
                     {/* Message Box (Global) */}
                     {message && (
-                        <div className={`p-3 mx-auto mt-4 max-w-4xl rounded-lg shadow-md ${
-                            message.type === 'error' ? 'bg-red-800 border-red-600' :
-                            message.type === 'success' ? 'bg-green-800 border-green-600' :
-                            'bg-blue-800 border-blue-600'
-                        } border z-10`} onClick={() => setMessage(null)}>
+                        // FIX: Replaced template literal with safe string concatenation to bypass parser error
+                        <div 
+                            className={"p-3 mx-auto mt-4 max-w-4xl rounded-lg shadow-md border z-10 " + (
+                                message.type === 'error' ? 'bg-red-800 border-red-600' :
+                                message.type === 'success' ? 'bg-green-800 border-green-600' :
+                                'bg-blue-800 border-blue-600'
+                            )} 
+                            onClick={() => setMessage(null)}
+                        >
                             <p className="font-medium text-center">{message.text}</p>
                         </div>
                     )}
