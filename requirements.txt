@@ -1,7 +1,3 @@
 streamlit
 requests
 beautifulsoup4
-firebase-admin
-pandas
-python-dateutil
-numpy
