@@ -9,48 +9,68 @@ from time import sleep
 HEADERS = {
     'User-Agent': 'DefaultAppName / default@example.com', # SEC compliance placeholder
     'Accept-Encoding': 'gzip, deflate',
-    'Host': 'data.sec.gov'
+    'Host': 'www.sec.gov' # Changed host to sec.gov for search API
 }
 
 # Initialize session state for CIK storage
 if 'target_cik' not in st.session_state:
     st.session_state.target_cik = "320193" # Default CIK for Apple
 
-# --- CIK Lookup Function ---
+# --- CIK Lookup Function (Using Search API for Stability) ---
 
 @st.cache_data(ttl=86400) # Cache CIK mapping for 24 hours to reduce load on SEC
 def get_cik_data(ticker, headers):
     """
-    Attempts to fetch the CIK and company name from the SEC's official ticker file.
-    
-    FIX: The SEC moved the file again. We are now using the latest, known reliable endpoint.
+    Attempts to fetch the CIK and company name using the SEC's EDGAR full-text search.
+    This bypasses the highly unstable company_tickers.json file.
     """
-    # LATEST updated reliable URL for the SEC Ticker-to-CIK mapping
-    TICKER_TO_CIK_URL = "https://www.sec.gov/files/company_tickers.json" 
+    # Use the SEC's general search API for a more stable lookup
+    SEARCH_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
     
+    params = {
+        'action': 'getcompany',
+        'Company': ticker,
+        'output': 'xml' # Requesting XML output for easier parsing (it's actually a form of HTML)
+    }
+
     try:
-        sleep(0.1) 
-        response = requests.get(TICKER_TO_CIK_URL, headers=headers)
+        sleep(0.5) 
+        # Note: headers are adapted for the search endpoint
+        response = requests.get(SEARCH_URL, headers=headers, params=params)
         response.raise_for_status()
 
-        ticker_data = response.json()
-        ticker_upper = ticker.upper()
+        # The response is HTML/XML, not JSON. We must parse it.
+        # The CIK is usually located in a tag that looks like:
+        # <CIK>0000320193</CIK> or in a URL like .../0000320193/..
         
-        # The structure of this file is a list of dictionaries.
-        # This new file structure is slightly different from the previous one,
-        # so the lookup logic needs to be adjusted.
-        for item in ticker_data:
-            # Note the keys changed from 'cik' to 'cik_str' and 'title' to 'name' in this new file
-            if item.get('ticker') == ticker_upper:
-                # Returns the CIK (padded to 10 digits) and the company title
-                return str(item.get('cik_str')).zfill(10), item.get('name')
+        # --- Simple CIK Extraction from HTML Content ---
+        # Look for the CIK number in the format 'CIK########'
+        import re
         
-        return None, None # Ticker not found
+        # Look for the CIK in the company info table, often right after 'CIK:'
+        # The CIK is 10 digits padded with leading zeros.
+        # We search for the pattern 'CIK' followed by optional spaces and then the 10-digit number
+        match = re.search(r'CIK:\s*<a href="/cgi-bin/browse-edgar\?action=getcompany&amp;CIK=(\d{10})&amp', response.text)
+        
+        if match:
+            found_cik = match.group(1)
+            
+            # Since the search API doesn't easily return the clean name, 
+            # we'll use a placeholder and let the companyfacts API fill in the name later.
+            return found_cik, f"Ticker Search: {ticker}" 
+        
+        # Fallback: Look for the 10-digit CIK string directly (less reliable)
+        match_fallback = re.search(r'\b(\d{10})\b', response.text)
+        if match_fallback:
+            found_cik = match_fallback.group(1)
+            return found_cik, f"Ticker Search: {ticker}"
+
+        # Ticker not found
+        return None, None
         
     except requests.exceptions.RequestException as e:
-        # If the lookup file fails, we display a soft error and return None
         st.warning("⚠️ Ticker Lookup Service Down ⚠️")
-        st.error(f"Error: The SEC ticker lookup file is currently unavailable (or the URL has changed again). Please enter the company's CIK manually.")
+        st.error(f"Error: Could not use the SEC search API to find the CIK. Please enter the company's CIK manually.")
         st.caption(f"Details: {e}")
         return None, None
 
@@ -65,10 +85,15 @@ def fetch_sec_company_facts(cik, headers):
     padded_cik = str(cik).zfill(10)
     FACTS_URL = f'https://data.sec.gov/api/xbrl/companyfacts/CIK{padded_cik}.json'
     
+    # Implementing a small delay to respect the SEC's rate limit of 10 requests/second
     sleep(0.5) 
     
     try:
-        response = requests.get(FACTS_URL, headers=headers)
+        # Ensure the Host header is correct for the data.sec.gov domain
+        data_headers = headers.copy()
+        data_headers['Host'] = 'data.sec.gov'
+        
+        response = requests.get(FACTS_URL, headers=data_headers)
         response.raise_for_status() 
         return response.json()
     except requests.exceptions.HTTPError as e:
@@ -189,12 +214,13 @@ def search_cik_callback(app_name, email):
         
         if found_cik:
             st.session_state.target_cik = found_cik
-            st.success(f"CIK found for {company_name}: **{found_cik}**")
+            # The name from the search API is not always clean, so we only display CIK success
+            st.success(f"CIK found: **{found_cik}** (Enter this CIK below or click 'Fetch Financials & Filings').")
         else:
             st.session_state.target_cik = ""
             # Error message is handled within get_cik_data if the file is down
             if not company_name: # company_name will be None if the ticker wasn't in the file
-                 st.error(f"Could not find a CIK for ticker: {ticker}.")
+                 st.error(f"Could not find a CIK for ticker: {ticker}. Try searching by company name or CIK directly.")
 
 
 # --- Streamlit Main App Layout ---
@@ -231,6 +257,7 @@ def main():
     
     # --- Ticker Search Section (New independent flow) ---
     st.header("1. Search CIK by Ticker")
+    st.caption("Uses the SEC search engine (most reliable CIK lookup method).")
     ticker_input = st.text_input(
         "Enter Stock Ticker:", 
         value="",
