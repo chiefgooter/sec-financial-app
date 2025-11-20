@@ -7,6 +7,7 @@ from io import StringIO
 import re
 from datetime import date
 from dateutil.relativedelta import relativedelta
+from bs4 import BeautifulSoup
 
 # --- Configuration & State ---
 # Initialize the user-agent headers. These will be updated from the sidebar inputs.
@@ -108,6 +109,62 @@ def fetch_sec_company_facts(cik, headers):
         st.error(f"Error fetching data: {e}. Check network connection or SEC API status.")
         return None
 
+# --- NEW: Secondary Filing List Fetcher (More robust than facts API 'listFilings') ---
+
+@st.cache_data(ttl=3600)
+def fetch_edgar_filings_list(cik, headers):
+    """
+    Scrapes the company's EDGAR document list page for recent filings.
+    This is used as a fallback/primary source for the filing list, as the facts API is unreliable for this list.
+    """
+    padded_cik = str(cik).zfill(10)
+    # The URL to the company's main EDGAR page listing all documents
+    EDGAR_URL = f'https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={padded_cik}&type=&dateb=&owner=exclude&count=100'
+    
+    sleep(0.5) 
+    
+    try:
+        data_headers = headers.copy()
+        data_headers['Host'] = 'www.sec.gov' 
+        
+        response = requests.get(EDGAR_URL, headers=data_headers)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Look for the main table containing the filing list
+        filings_table = soup.find('table', class_='tableFile2')
+        if not filings_table:
+            st.warning(f"Could not find the filing list table on the EDGAR page for CIK {cik}.")
+            return []
+
+        filings_data = []
+        # Iterate over all rows, skipping the header row
+        for row in filings_table.find_all('tr')[1:]:
+            cols = row.find_all('td')
+            if len(cols) >= 5: # Expect at least 5 columns: type, link to filing, description, date, file number
+                form_type = cols[0].text.strip()
+                date_filed = cols[3].text.strip()
+                
+                # Find the link to the document itself (which is often in the 2nd column)
+                document_link_tag = cols[1].find('a')
+                if document_link_tag:
+                    # The href is relative, so we need to prepend the base URL
+                    relative_href = document_link_tag.get('href')
+                    document_link = f"https://www.sec.gov{relative_href}"
+                    filings_data.append({
+                        'Filing Type': form_type,
+                        'Filing Date': date_filed,
+                        'Link': document_link,
+                        'Description': 'Link to Index File' # Simple description for this method
+                    })
+        
+        return filings_data
+
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching filings from EDGAR page for CIK {cik}: {e}")
+        return []
+
 # --- Function to fetch a recent Master Index File ---
 
 @st.cache_data(ttl=86400) # Cache the massive index file for 24 hours
@@ -195,38 +252,51 @@ def display_key_metrics(data, identifier):
 
 # --- Company Filings Presentation Function ---
 
-def display_company_filings(data, company_name):
+def display_company_filings(data, cik, company_name, headers):
     """
-    Displays the recent company filings by extracting data from the 'companyfacts' JSON,
-    and allows filtering by filing type.
+    Displays the recent company filings. It first tries to use the facts API data,
+    then falls back to scraping the EDGAR page for a more complete list.
     """
     st.markdown("---")
     st.header(f"Recent Filings ({company_name})")
 
-    filings_list = data.get('listFilings', [])
-
-    if not filings_list:
-        st.warning("No recent filings data available in the company facts file.")
-        return
+    # 1. Try to get filing list from facts API (unreliable)
+    filings_list_from_facts = data.get('listFilings', [])
 
     filings_for_df = []
-    all_filing_types = set()
     
-    for filing in filings_list:
-        filing_type = filing.get('form', 'N/A')
-        all_filing_types.add(filing_type)
-        filings_for_df.append({
-            'Filing Type': filing_type,
-            'Filing Date': filing.get('filingDate', 'N/A'),
-            'Description': filing.get('formDescription', 'N/A'),
-            'CIK': data.get('cik'), 
-            'Accession Number': filing.get('accessionNumber', 'N/A')
-        })
+    if filings_list_from_facts:
+        st.caption("Using filing data from the structured 'facts' API.")
+        for filing in filings_list_from_facts:
+            # Construct a direct link to the full text document
+            acc_no = filing.get('accessionNumber', 'N/A').replace('-', '')
+            link = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_no}/{filing.get('accessionNumber', 'N/A')}.txt"
+            filings_for_df.append({
+                'Filing Type': filing.get('form', 'N/A'),
+                'Filing Date': filing.get('filingDate', 'N/A'),
+                'Description': filing.get('formDescription', 'N/A'),
+                'Link': link
+            })
+    else:
+        # 2. Fallback: Scrape the company's main EDGAR page (more reliable list)
+        st.warning("Structured filing list missing from the facts API. Falling back to EDGAR document search.")
+        with st.spinner("Fetching list of recent filings from the main EDGAR search page..."):
+            filings_for_df = fetch_edgar_filings_list(cik, headers)
+        
+        if not filings_for_df:
+            st.warning("No recent filings data available from any source.")
+            return
 
     df = pd.DataFrame(filings_for_df)
     
+    # Identify all available filing types
+    all_filing_types = set(df['Filing Type'].unique())
+    
     # 1. Add Filing Type Filter
-    default_selection = [t for t in ['10-K', '10-Q', '8-K'] if t in all_filing_types]
+    default_selection = [t for t in ['10-K', '10-Q', '8-K', '4'] if t in all_filing_types]
+    if not default_selection and all_filing_types:
+        # Default to the first few if common ones aren't found
+        default_selection = sorted(list(all_filing_types))[:3]
     
     selected_types = st.multiselect(
         "Filter Filings by Type:",
@@ -242,12 +312,6 @@ def display_company_filings(data, company_name):
 
     # Limit to the top 20 recent filtered filings for a cleaner view
     df_display = df_filtered.head(20).copy()
-
-    def create_sec_link(row):
-        acc_no_clean = row['Accession Number'].replace('-', '')
-        return f"https://www.sec.gov/Archives/edgar/data/{row['CIK']}/{acc_no_clean}/{row['Accession Number']}.txt"
-
-    df_display['Link'] = df_display.apply(create_sec_link, axis=1)
 
     df_final = df_display[['Filing Type', 'Filing Date', 'Description', 'Link']]
     
@@ -386,8 +450,9 @@ def main():
                 company_name = company_data.get('entityName', 'N/A')
                 display_identifier = f"CIK: {target_cik}"
                 
-                # 1. Display Filings with Filter
-                display_company_filings(company_data, company_name)
+                # 1. Display Filings with Filter (Now uses the fallback function)
+                # Pass HEADERS and CIK so the fallback can work
+                display_company_filings(company_data, target_cik, company_name, HEADERS)
                 
                 # 2. Display Metrics
                 if 'facts' in company_data:
