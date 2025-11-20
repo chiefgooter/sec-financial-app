@@ -710,7 +710,7 @@ const App = () => {
                 <main className="flex-1 overflow-y-auto">
                     {/* Message Box (Global) */}
                     {message && (
-                        // FIX: Replaced template literal with safe string concatenation to bypass parser error
+                        // Used string concatenation to bypass previous parser error
                         <div 
                             className={"p-3 mx-auto mt-4 max-w-4xl rounded-lg shadow-md border z-10 " + (
                                 message.type === 'error' ? 'bg-red-800 border-red-600' :
@@ -726,22 +726,22 @@ const App = () => {
                 </main>
             </div>
 
-            {/* Global Style Block (Consolidated Custom CSS for stability) */}
+            {/* Global Style Block (Custom CSS with PURE PIXEL UNITS to avoid decimal errors) */}
             <style>{`
-                /* Styles for LLM-generated Markdown content */
-                .analysis-content p { margin-bottom: 1rem; }
+                /* Styles for LLM-generated Markdown content - all rem/decimals converted to px for parser stability */
+                .analysis-content p { margin-bottom: 16px; } /* 1rem */
                 .analysis-content ul { 
                     list-style: disc; 
-                    margin-left: 1.5rem; /* 24px */
+                    margin-left: 24px; /* 1.5rem */
                     padding-left: 0; 
-                    margin-top: 0.5rem; /* 8px */
+                    margin-top: 8px; /* 0.5rem */
                 }
-                .analysis-content ul li { margin-bottom: 0.5rem; }
+                .analysis-content ul li { margin-bottom: 8px; } /* 0.5rem */
                 .analysis-content h3 { 
-                    font-size: 1.25rem; 
+                    font-size: 20px; /* 1.25rem */
                     font-weight: 700; 
-                    margin-top: 1.5rem; 
-                    margin-bottom: 0.5rem; 
+                    margin-top: 24px; 
+                    margin-bottom: 8px; 
                     color: #fcd34d; /* yellow-300 */
                 }
                 
