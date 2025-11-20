@@ -168,16 +168,15 @@ const SecFilingsTab = ({ setMessage }) => {
                 <div className="mt-6 bg-gray-700 p-5 rounded-lg">
                     <h3 className="text-xl font-bold mb-3 text-yellow-200 border-b border-gray-600 pb-2">Analysis Summary</h3>
                     
-                    {/* Inject Analysis Content from LLM. Now using the global style class for formatting. */}
+                    {/* Inject Analysis Content from LLM. */}
                     <div className="analysis-content text-gray-300 mb-6" dangerouslySetInnerHTML={{ __html: filingData.text }} />
-                    
-                    {/* Custom style block removed to fix compilation error */}
                     
                     <h3 className="text-lg font-semibold mt-4 mb-2 text-gray-300">Cited Sources ({filingData.sources.length})</h3>
                     <ul className="space-y-1 text-sm">
                         {filingData.sources.map((source, index) => (
                             <li key={index} className="flex items-start">
-                                <span className="text-yellow-400 mr-2 flex-shrink-0">•</span>
+                                {/* FIX: Replaced the literal '•' with the HTML entity '&bull;' */}
+                                <span className="text-yellow-400 mr-2 flex-shrink-0" dangerouslySetInnerHTML={{ __html: '&bull;' }} />
                                 <a 
                                     href={source.uri} 
                                     target="_blank" 
