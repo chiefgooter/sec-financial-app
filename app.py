@@ -40,31 +40,21 @@ def get_cik_data(ticker, headers):
         response.raise_for_status()
 
         # The response is HTML/XML, not JSON. We must parse it.
-        # The CIK is usually located in a tag that looks like:
-        # <CIK>0000320193</CIK> or in a URL like .../0000320193/..
-        
-        # --- Simple CIK Extraction from HTML Content ---
-        # Look for the CIK number in the format 'CIK########'
         import re
         
-        # Look for the CIK in the company info table, often right after 'CIK:'
-        # The CIK is 10 digits padded with leading zeros.
-        # We search for the pattern 'CIK' followed by optional spaces and then the 10-digit number
-        match = re.search(r'CIK:\s*<a href="/cgi-bin/browse-edgar\?action=getcompany&amp;CIK=(\d{10})&amp', response.text)
+        # --- ROBUST CIK EXTRACTION ---
+        # Look for the CIK number, which is always a 10-digit number following 'CIK'
+        # This is less dependent on the exact HTML anchor structure.
+        # It searches for: CIK followed by whitespace/non-digit chars, and then the 10-digit number.
+        cik_match = re.search(r'CIK[^0-9]*(\d{10})', response.text)
         
-        if match:
-            found_cik = match.group(1)
+        if cik_match:
+            found_cik = cik_match.group(1)
             
             # Since the search API doesn't easily return the clean name, 
             # we'll use a placeholder and let the companyfacts API fill in the name later.
             return found_cik, f"Ticker Search: {ticker}" 
         
-        # Fallback: Look for the 10-digit CIK string directly (less reliable)
-        match_fallback = re.search(r'\b(\d{10})\b', response.text)
-        if match_fallback:
-            found_cik = match_fallback.group(1)
-            return found_cik, f"Ticker Search: {ticker}"
-
         # Ticker not found
         return None, None
         
