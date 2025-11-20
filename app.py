@@ -792,7 +792,8 @@ def main():
         
         col1, col2 = st.columns([1, 1])
         col1.button("Load Filings", on_click=load_master_index_callback, args=(selected_key, index_options))
-        col2.button("Clear Loaded Data", on_on_click=clear_master_index_callback)
+        # FIXED: Corrected 'on_on_click' to 'on_click'
+        col2.button("Clear Loaded Data", on_click=clear_master_index_callback)
         
         df = st.session_state.master_filings_df
         if not df.empty:
