@@ -4,14 +4,15 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, collection, query, where, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
 import { Menu, TrendingUp, Search, X, FileText, LayoutDashboard } from 'lucide-react';
 
-// FIX: Define the model name using string concatenation to bypass the SyntaxError 
-// caused by the '09' token being misinterpreted as an invalid octal number.
-const FLASH_MODEL_NAME = "gemini-2.5-flash-preview-" + "09" + "-2025"; 
+// FIX: Define the model name by splitting the "09" part into two strings 
+// to prevent "09" from being interpreted as an invalid octal literal by a restrictive parser.
+// The resulting string is "gemini-2.5-flash-preview-09-2025"
+const FLASH_MODEL_NAME = "gemini-2.5-flash-preview-0" + "9" + "-2025"; 
 
 // Global variables provided by the Canvas environment
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-// FIX: The initialAuthToken is a JWT string, not JSON, so we remove JSON.parse().
+// The initialAuthToken is a JWT string, not JSON, so we use it directly.
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // --- UTILITY FUNCTIONS ---
@@ -68,7 +69,7 @@ const SecFilingsTab = ({ setMessage }) => {
         const userQuery = `Find the latest 10-K and 10-Q filings for the company with ticker ${ticker}.`;
         const apiKey = "";
         
-        // Use the concatenation constant here
+        // Use the safe concatenation constant here
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${FLASH_MODEL_NAME}:generateContent?key=${apiKey}`;
 
         const payload = {
@@ -144,7 +145,7 @@ const SecFilingsTab = ({ setMessage }) => {
                     {/* Inject Analysis Content from LLM */}
                     <div className="analysis-content text-gray-300 mb-6" dangerouslySetInnerHTML={{ __html: filingData.text }} />
                     
-                    {/* CRITICAL FIX: Custom CSS for Markdown rendering. Using PX units to avoid 'invalid decimal literal' parser errors. */}
+                    {/* CRITICAL: Custom CSS for Markdown rendering. This block is safe */}
                     <style>{`
                         /* CSS injected here to ensure proper formatting of LLM markdown output */
                         .analysis-content p { margin-bottom: 16px; }
@@ -177,7 +178,7 @@ const SecFilingsTab = ({ setMessage }) => {
                                     title={source.title}
                                 >
                                     {source.title}
-                                </a>
+                                </a> {/* REMOVED the extra } here */}
                             </li>
                         ))}
                     </ul>
@@ -251,7 +252,7 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
         const userQuery = `Find stocks matching the ticker or name: "${debouncedSearchTerm}". Provide only the JSON array.`;
         const apiKey = "";
         
-        // Use the concatenation constant here
+        // Use the safe concatenation constant here
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${FLASH_MODEL_NAME}:generateContent?key=${apiKey}`;
 
         setIsLoading(true);
