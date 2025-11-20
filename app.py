@@ -10,98 +10,95 @@ from dateutil.relativedelta import relativedelta
 from bs4 import BeautifulSoup
 import numpy as np # Used for handling NaN in DataFrame operations
 
-# --- Firebase Imports (Needed for Watchlists) ---
-# Global variables are provided by the canvas environment
+# --- Firebase Imports ---
 try:
     import firebase_admin
     from firebase_admin import initialize_app, firestore, credentials
-    # Note: Using credentials.Certificate is often the source of 'black screen' errors 
-    # when the key is not provided. We will fix the initialization below.
 except ImportError:
-    st.error("Firebase Admin SDK is not installed. Please add 'firebase-admin' to requirements.txt.")
-    st.stop()
-
+    # If firebase-admin is not installed, the app will run without watchlist functionality
+    firebase_admin = None
 
 # --- Configuration & State ---
-# Initialize the user-agent headers. These will be updated from the sidebar inputs.
 HEADERS = {
     'User-Agent': 'DefaultAppName / default@example.com', # SEC compliance placeholder
     'Accept-Encoding': 'gzip, deflate',
     'Host': 'www.sec.gov'
 }
 
-# Base URLs
 CIK_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 SUBMISSION_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 
-# Initialize session state for CIK storage and Watchlist
-if 'target_cik' not in st.session_state:
-    st.session_state.target_cik = "320193" # Default CIK for Apple
-if 'master_filings_df' not in st.session_state:
-    st.session_state.master_filings_df = pd.DataFrame()
-if 'loaded_index_key' not in st.session_state: 
-    st.session_state.loaded_index_key = ""
-if 'watchlists' not in st.session_state:
-    st.session_state.watchlists = {} # {list_name: {cik: name}}
-if 'selected_watchlist' not in st.session_state:
-    st.session_state.selected_watchlist = None
-if 'firebase_initialized' not in st.session_state:
-    st.session_state.firebase_initialized = False
-if 'db' not in st.session_state:
-    st.session_state.db = None
-if 'user_id' not in st.session_state:
-    st.session_state.user_id = None
-if 'watchlists_loading' not in st.session_state:
-    st.session_state.watchlists_loading = False
+def initialize_session_state():
+    """
+    Initializes all necessary session state variables robustly.
+    This prevents common Streamlit AttributeErrors on startup.
+    """
+    
+    # Financial Data
+    if 'target_cik' not in st.session_state:
+        st.session_state.target_cik = "320193" # Default CIK for Apple
+    if 'master_filings_df' not in st.session_state:
+        st.session_state.master_filings_df = pd.DataFrame()
+    if 'loaded_index_key' not in st.session_state: 
+        st.session_state.loaded_index_key = ""
+        
+    # Firebase and Watchlist
+    if 'watchlists' not in st.session_state:
+        st.session_state.watchlists = {} # {list_name: {cik: name}}
+    if 'selected_watchlist' not in st.session_state:
+        st.session_state.selected_watchlist = None
+    if 'firebase_initialized' not in st.session_state:
+        st.session_state.firebase_initialized = False
+    if 'db' not in st.session_state:
+        st.session_state.db = None
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = None
+    if 'watchlists_loading' not in st.session_state:
+        st.session_state.watchlists_loading = False
+    if 'app_name' not in st.session_state: 
+        st.session_state.app_name = "Financial-Data-App"
+    if 'email' not in st.session_state: 
+        st.session_state.email = "user@example.com"
+
 
 # --- FIREBASE INITIALIZATION HANDLER (FIXED) ---
 
 def initialize_firebase():
     """Initializes Firebase and authenticates the user."""
-    if st.session_state.firebase_initialized:
-        return True
+    if st.session_state.firebase_initialized or not firebase_admin:
+        return st.session_state.firebase_initialized
 
     try:
         # Load config and app ID from global environment variables
         app_id = globals().get('__app_id', 'default-app-id')
-        # Load the raw config string and attempt to parse it
         firebase_config_str = globals().get('__firebase_config', '{}')
         firebase_config = json.loads(firebase_config_str)
         initial_auth_token = globals().get('__initial_auth_token', None)
         
         if not firebase_config or not firebase_config.get('projectId'):
-            st.warning("Firebase config is missing. Watchlist feature will not be persistent.")
             st.session_state.db = None
+            st.session_state.firebase_initialized = False
             return False
-
-        # --- CRITICAL FIX START ---
-        # Instead of using credentials.Certificate with dummy data (which causes a black screen crash),
-        # we try to initialize the app relying on environment credentials or use the provided 
-        # project ID in a safe manner, handling potential re-initialization errors.
 
         try:
             # Check if app is already initialized. Use get_app to retrieve.
             app = firebase_admin.get_app(name=app_id)
         except ValueError:
-            # If not initialized, try to initialize it without explicit credentials,
-            # relying on the platform's execution context for authentication.
+            # If not initialized, initialize it safely.
             app = initialize_app(options={'projectId': firebase_config['projectId']}, name=app_id) 
         except Exception as e:
             st.error(f"Failed to initialize Firebase app: {e}")
             st.session_state.db = None
+            st.session_state.firebase_initialized = False
             return False
-        # --- CRITICAL FIX END ---
 
         st.session_state.db = firestore.client(app=app)
         st.session_state.app_id = app_id
         
         # Determine User ID (simulated using the provided auth token)
         if initial_auth_token:
-            # Placeholder logic to derive a consistent UID from the token for Firestore
-            # This is a safe way to generate a stable user ID based on the token
             st.session_state.user_id = "canvas_user_" + str(hash(initial_auth_token) % 1000000)
         else:
-            # Anonymous or default user
             st.session_state.user_id = "anon_user" 
 
         st.session_state.firebase_initialized = True
@@ -110,6 +107,7 @@ def initialize_firebase():
     except Exception as e:
         st.error(f"Error initializing Firebase. Watchlists will not be saved: {e}")
         st.session_state.db = None
+        st.session_state.firebase_initialized = False
         return False
 
 # --- WATCHLIST HANDLERS ---
@@ -177,7 +175,6 @@ def save_watchlist(name, companies):
 
 def add_company_to_watchlist_callback():
     """Callback to add a company to the currently selected watchlist."""
-    # Renamed key for clarity
     list_name = st.session_state.watchlist_select_box 
     cik_to_add = st.session_state.company_cik_input.strip()
     company_name_input = st.session_state.company_name_input.strip()
@@ -200,7 +197,7 @@ def add_company_to_watchlist_callback():
     if save_watchlist(list_name, current_list):
         st.toast(f"Added {company_name_input} to '{list_name}'.")
         st.session_state.company_cik_input = ""
-        st.session_state.company_name_input = "" # Clear inputs
+        st.session_state.company_name_input = "" 
 
 def create_watchlist_callback():
     """Callback to create a new watchlist."""
@@ -212,9 +209,7 @@ def create_watchlist_callback():
         st.error(f"Watchlist '{new_name}' already exists.")
         return
     
-    # Create and save an empty list
     if save_watchlist(new_name, {}):
-        # Update the select box state to the newly created list
         st.session_state.selected_watchlist = new_name 
         st.session_state.new_watchlist_name = ""
 
@@ -259,12 +254,14 @@ def get_cik_data(ticker, headers):
         response.raise_for_status()
 
         found_cik = None
+        # Use regex to find the CIK in the document URL part of the response text
         cik_match_1 = re.search(r'/edgar/data/(\d{10})/', response.text)
         
         if cik_match_1:
             found_cik = cik_match_1.group(1)
         
         if found_cik:
+            # Try to extract the company name from the title tag
             name_match = re.search(r'<title>(.+?) - S', response.text)
             company_name = name_match.group(1) if name_match else f"Ticker Search: {ticker}"
             return found_cik, company_name
@@ -272,7 +269,7 @@ def get_cik_data(ticker, headers):
         return None, None
         
     except requests.exceptions.RequestException as e:
-        st.error(f"Error during Ticker Lookup: {e}")
+        # st.error(f"Error during Ticker Lookup: {e}") # Suppressing console errors for cleaner UI
         return None, None
 
 def search_cik_callback(app_name, email):
@@ -283,7 +280,6 @@ def search_cik_callback(app_name, email):
         return
 
     with st.spinner(f"Searching for CIK for {ticker_input}..."):
-        # Update HEADERS locally for this call
         local_headers = {'User-Agent': f'{app_name} / {email}', 'Accept-Encoding': 'gzip, deflate', 'Host': 'www.sec.gov'}
         cik, company_name = get_cik_data(ticker_input, local_headers)
 
@@ -291,7 +287,6 @@ def search_cik_callback(app_name, email):
             st.success(f"Found CIK for {company_name}: **{cik}**")
             st.session_state.target_cik = cik
             st.session_state.cik_lookup_result = f"CIK: {cik}, Company: {company_name}"
-            # This is important: it sets the main CIK input for the other tab
             st.session_state.cik_input_final = cik 
         else:
             st.error(f"Could not find a CIK for ticker: {ticker_input}")
@@ -313,7 +308,7 @@ def fetch_sec_company_facts(cik, headers):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching company facts for CIK {padded_cik}: {e}")
+        # st.error(f"Error fetching company facts for CIK {padded_cik}: {e}")
         return None
 
 def extract_metric(facts_json, taxonomy, tag, unit='USD'):
@@ -323,22 +318,18 @@ def extract_metric(facts_json, taxonomy, tag, unit='USD'):
     if facts_json is None: return None, None
 
     try:
-        # Navigate the facts JSON structure
         data = facts_json['facts'][taxonomy][tag]['units'][unit]
         
-        # Get the most recent non-empty value
-        # Data is a list of dicts, we sort by 'end' date to find the latest
         data_sorted = sorted(data, key=lambda x: pd.to_datetime(x.get('end', '1900-01-01'), errors='coerce'), reverse=True)
         
-        # Find the first data point that has a 'val'
         for entry in data_sorted:
             if 'val' in entry:
                 return entry['val'], entry.get('end', 'N/A')
         
-        return None, None # No value found
+        return None, None 
         
     except KeyError:
-        return None, None # Metric not found
+        return None, None 
 
 
 def display_key_metrics(facts_json):
@@ -364,7 +355,7 @@ def display_key_metrics(facts_json):
         value, date_end = extract_metric(facts_json, taxonomy, tag, unit)
         
         if value is not None:
-            formatted_value = f"${value:,.0f}" if value > 1000 else f"${value:,.2f}"
+            formatted_value = f"${value:,.0f}" if abs(value) > 1000 else f"${value:,.2f}"
         else:
             formatted_value = "N/A"
         
@@ -372,7 +363,6 @@ def display_key_metrics(facts_json):
 
     df_metrics = pd.DataFrame(metric_data)
     
-    # Use columns for a card-like view
     cols = st.columns(len(df_metrics))
     for i, row in df_metrics.iterrows():
         cols[i].metric(
@@ -422,7 +412,7 @@ def fetch_edgar_filings_list(cik, headers):
         return filings_data
 
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching EDGAR list: {e}")
+        # st.error(f"Error fetching EDGAR list: {e}")
         return []
 
 def display_company_filings(facts_json, cik, company_name, headers):
@@ -549,12 +539,12 @@ def display_watchlist_summary(watchlist_companies, headers):
     
     all_filings = []
     
-    # We use st.cache_data here to cache the combined result for a period
     @st.cache_data(ttl=600)
     def fetch_combined_watchlist_filings(_companies, _headers):
         combined_filings = []
         for cik, name in _companies.items():
             st.caption(f"Fetching filings for {name} ({cik})...")
+            # We use the robust EDGAR scraping method here
             filings = fetch_edgar_filings_list(cik, _headers)
             for filing in filings:
                 filing['Company Name'] = name
@@ -570,7 +560,6 @@ def display_watchlist_summary(watchlist_companies, headers):
 
     df_raw = pd.DataFrame(all_filings)
     
-    # Process date column
     df_raw['Filing Date'] = pd.to_datetime(df_raw['Filing Date'], errors='coerce')
     df_raw.dropna(subset=['Filing Date'], inplace=True)
          
@@ -578,7 +567,6 @@ def display_watchlist_summary(watchlist_companies, headers):
     
     filter_cols = st.columns([1, 2])
     
-    # 1. Company Filter
     all_company_names = sorted(df_raw['Company Name'].unique())
     selected_companies = filter_cols[0].multiselect(
         "Filter by Company:",
@@ -587,7 +575,6 @@ def display_watchlist_summary(watchlist_companies, headers):
         key='watchlist_company_filter'
     )
     
-    # 2. Filing Type Filter
     all_forms = sorted(df_raw['Filing Type'].unique())
     default_forms = [f for f in ['10-K', '10-Q', '8-K', '4', 'S-1', 'D'] if f in all_forms]
     selected_forms = filter_cols[1].multiselect(
@@ -602,12 +589,10 @@ def display_watchlist_summary(watchlist_companies, headers):
         df_raw['Filing Type'].isin(selected_forms)
     ]
 
-    # --- Final Display ---
     df_display = df_filtered.sort_values(by='Filing Date', ascending=False).head(500)
     
     st.subheader(f"Filtered Filings ({len(df_display):,} Found)")
     
-    # Add a 'Use CIK' button column
     df_display['Action'] = df_display['CIK'].apply(lambda x: f"CIK: {x}")
     
     st.dataframe(
@@ -630,6 +615,10 @@ def display_watchlist_summary(watchlist_companies, headers):
 # --- Streamlit Main App Layout ---
 
 def main():
+    
+    # CRITICAL: Initialize ALL state variables before Streamlit configuration
+    initialize_session_state()
+
     st.set_page_config(
         page_title="SEC EDGAR Data Viewer",
         layout="wide", 
@@ -641,16 +630,12 @@ def main():
     # --- Initialize Firebase and Load Watchlists ---
     firebase_ready = initialize_firebase()
     if firebase_ready:
-        # Load watchlists only if initialization was successful
         load_watchlists() 
 
     # --- Sidebar Setup ---
     
     # --- 1. SEC Compliance ---
     st.sidebar.header("SEC Compliance (Required)")
-    if 'app_name' not in st.session_state: st.session_state.app_name = "Financial-Data-App"
-    if 'email' not in st.session_state: st.session_state.email = "user@example.com"
-        
     app_name = st.sidebar.text_input("Application Name:", key='app_name')
     email = st.sidebar.text_input("Contact Email:", key='email')
     
@@ -665,24 +650,20 @@ def main():
     else:
         
         watchlist_names = list(st.session_state.watchlists.keys())
-        # Add a placeholder if no lists exist
         options_list = watchlist_names if watchlist_names else ["<No Watchlists>"]
         
-        # Determine the default index for the select box
         default_index = 0
         if st.session_state.selected_watchlist in watchlist_names:
             default_index = watchlist_names.index(st.session_state.selected_watchlist)
         
-        # Select Watchlist
         selected_list_name = st.sidebar.selectbox(
             "Select Watchlist:",
             options=options_list,
             index=default_index,
             key='watchlist_select_box'
         )
-        st.session_state.selected_watchlist = selected_list_name # Update main state
+        st.session_state.selected_watchlist = selected_list_name 
         
-        # Display current companies in the selected watchlist
         if selected_list_name and selected_list_name != "<No Watchlists>":
             current_list = st.session_state.watchlists.get(selected_list_name, {})
             st.sidebar.caption(f"**{len(current_list)}** companies in list.")
@@ -753,7 +734,6 @@ def main():
         st.header("Fetch Data by CIK")
         st.markdown("Use this section to fetch detailed financial metrics and recent filings for a **single company** identified by its Central Index Key (CIK).")
         
-        # CIK Input Section
         target_cik = st.text_input(
             "Central Index Key (CIK):", 
             value=st.session_state.target_cik, 
@@ -789,7 +769,6 @@ def main():
     with tab_daily_index:
         st.header("Browse Recent SEC Filings Index")
         
-        # Define recent index options (relative to today's date for freshness)
         current_date = date.today()
         current_year = current_date.year
         current_qtr = (current_date.month - 1) // 3 + 1
@@ -813,13 +792,12 @@ def main():
         
         col1, col2 = st.columns([1, 1])
         col1.button("Load Filings", on_click=load_master_index_callback, args=(selected_key, index_options))
-        col2.button("Clear Loaded Data", on_click=clear_master_index_callback)
+        col2.button("Clear Loaded Data", on_on_click=clear_master_index_callback)
         
         df = st.session_state.master_filings_df
         if not df.empty:
             st.subheader(f"Filings for {st.session_state.loaded_index_key} ({len(df):,} Total)")
             
-            # Filtering
             unique_forms = sorted(df['Form Type'].unique())
             form_filter = st.multiselect(
                 "Filter by Form Type:", 
@@ -832,7 +810,6 @@ def main():
             
             st.caption(f"Showing {len(df_filtered):,} filtered filings.")
 
-            # Create a button column for CIK usage
             df_display = df_filtered.head(50).copy()
             df_display['Action'] = df_display['CIK'].apply(lambda x: f"CIK: {x}")
             
@@ -868,5 +845,5 @@ def main():
         if 'cik_lookup_result' in st.session_state and st.session_state.cik_lookup_result:
             st.markdown(f"**Result:** {st.session_state.cik_lookup_result}")
 
-if __name__ == '__main4__':
+if __name__ == '__main__':
     main()
