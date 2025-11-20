@@ -133,9 +133,29 @@ const SecFilingsTab = ({ setMessage }) => {
             return (
                 <div className="mt-6 bg-gray-700 p-5 rounded-lg">
                     <h3 className="text-xl font-bold mb-3 text-yellow-200 border-b border-gray-600 pb-2">Analysis Summary</h3>
-                    {/* The response text is markdown, so we use dangerouslySetInnerHTML for rendering the bullet points and formatting */}
-                    <div className="prose prose-sm prose-invert max-w-none text-gray-300 mb-6" dangerouslySetInnerHTML={{ __html: filingData.text }} />
-
+                    
+                    {/* FIX: Using analysis-content class instead of 'prose' 
+                        to ensure proper rendering of markdown without the Tailwind Typography plugin.
+                    */}
+                    <div className="analysis-content text-gray-300 mb-6" dangerouslySetInnerHTML={{ __html: filingData.text }} />
+                    <style>{`
+                        .analysis-content p { margin-bottom: 1em; }
+                        .analysis-content ul { 
+                            list-style: disc; 
+                            margin-left: 1.5em; 
+                            padding-left: 0; 
+                            margin-top: 0.5em;
+                        }
+                        .analysis-content ul li { margin-bottom: 0.5em; }
+                        .analysis-content h3 { 
+                            font-size: 1.25rem; 
+                            font-weight: 700; 
+                            margin-top: 1.5em; 
+                            margin-bottom: 0.5em; 
+                            color: #fcd34d; /* yellow-300 */
+                        }
+                    `}</style>
+                    
                     <h3 className="text-lg font-semibold mt-4 mb-2 text-gray-300">Cited Sources ({filingData.sources.length})</h3>
                     <ul className="space-y-1 text-sm">
                         {filingData.sources.map((source, index) => (
