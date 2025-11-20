@@ -11,15 +11,15 @@ HEADERS = {
     'Host': 'data.sec.gov'
 }
 
-# --- CIK Lookup Function ---
+# --- CIK Lookup Function (Function name changed to force cache clear) ---
 
 @st.cache_data(ttl=86400) # Cache CIK mapping for 24 hours
-def get_cik_from_ticker(ticker, headers):
+def get_cik_data(ticker, headers):
     """
     Fetches the SEC company_tickers.json mapping file and looks up the CIK 
     using a given stock ticker.
     """
-    # *** FIX APPLIED HERE *** # The original URL was giving a 404 error. This alternative endpoint is more robust.
+    # CORRECTED URL: This endpoint is more robust against recent SEC changes.
     TICKER_TO_CIK_URL = "https://www.sec.gov/files/company-tickers/edgar_company_tickers.json"
     
     try:
@@ -32,11 +32,9 @@ def get_cik_from_ticker(ticker, headers):
         ticker_upper = ticker.upper()
         
         # Iterate through the list of dictionaries (where each item is a company)
-        # Note: The structure of the new endpoint returns a list of dictionaries, not a dictionary of dictionaries.
         for item in ticker_data:
             if item['ticker'] == ticker_upper:
                 # Returns the CIK (which is the CIK string padded to 10 digits)
-                # 'cik' key is now 'cik_str' in this endpoint.
                 return str(item['cik']).zfill(10), item['title']
 
         return None, None # Ticker not found
@@ -156,9 +154,14 @@ def main():
             st.error("Please enter a stock ticker.")
             return
 
+        # Check if the user has provided valid compliance info (optional, but good practice)
+        if app_name.strip() == "MySECApp" or email.strip() == "user@example.com":
+             st.warning("Please update the Application Name and Contact Email in the sidebar for SEC compliance.")
+
         with st.spinner(f"Looking up CIK for {ticker_input}..."):
             # 1. Lookup CIK from Ticker
-            cik, company_name = get_cik_from_ticker(ticker_input, HEADERS)
+            # Calling the new function name: get_cik_data
+            cik, company_name = get_cik_data(ticker_input, HEADERS)
             
             if not cik:
                 st.error(f"Could not find a CIK for ticker: **{ticker_input}**.")
