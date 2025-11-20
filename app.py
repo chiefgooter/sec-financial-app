@@ -22,8 +22,12 @@ if 'target_cik' not in st.session_state:
 def get_cik_data(ticker, headers):
     """
     Attempts to fetch the CIK and company name from the SEC's official ticker file.
+    
+    FIX: The old URL (company-tickers.json) was broken (404). 
+    We are now using the new, more reliable endpoint: company-tickers-submitted.json
     """
-    TICKER_TO_CIK_URL = "https://www.sec.gov/files/company-tickers.json" 
+    # Updated reliable URL for the SEC Ticker-to-CIK mapping
+    TICKER_TO_CIK_URL = "https://www.sec.gov/files/company-tickers-submitted.json" 
     
     try:
         sleep(0.1) 
@@ -33,15 +37,18 @@ def get_cik_data(ticker, headers):
         ticker_data = response.json()
         ticker_upper = ticker.upper()
         
+        # The structure of this file is a dictionary where the key is a running index
         for item in ticker_data.values():
             if item['ticker'] == ticker_upper:
-                return str(item['cik_str']).zfill(10), item['title']
+                # Returns the CIK (padded to 10 digits) and the company title
+                return str(item['cik']).zfill(10), item['title']
         
         return None, None # Ticker not found
         
     except requests.exceptions.RequestException as e:
         # If the lookup file fails, we display a soft error and return None
         st.warning("⚠️ Ticker Lookup Service Down ⚠️")
+        # Display the error but hide the specific, potentially confusing URL detail for the user
         st.error(f"Error: The SEC ticker lookup file is currently unavailable. Please enter the company's CIK manually.")
         st.caption(f"Details: {e}")
         return None, None
