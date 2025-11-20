@@ -64,7 +64,9 @@ def initialize_firebase():
     try:
         # Load config and app ID from global environment variables
         app_id = globals().get('__app_id', 'default-app-id')
-        firebase_config = json.loads(globals().get('__firebase_config', '{}'))
+        # Load the raw config string and attempt to parse it
+        firebase_config_str = globals().get('__firebase_config', '{}')
+        firebase_config = json.loads(firebase_config_str)
         initial_auth_token = globals().get('__initial_auth_token', None)
         
         if not firebase_config or not firebase_config.get('projectId'):
@@ -83,7 +85,7 @@ def initialize_firebase():
         except ValueError:
             # If not initialized, try to initialize it without explicit credentials,
             # relying on the platform's execution context for authentication.
-            app = initialize_app(name=app_id) 
+            app = initialize_app(options={'projectId': firebase_config['projectId']}, name=app_id) 
         except Exception as e:
             st.error(f"Failed to initialize Firebase app: {e}")
             st.session_state.db = None
@@ -96,6 +98,7 @@ def initialize_firebase():
         # Determine User ID (simulated using the provided auth token)
         if initial_auth_token:
             # Placeholder logic to derive a consistent UID from the token for Firestore
+            # This is a safe way to generate a stable user ID based on the token
             st.session_state.user_id = "canvas_user_" + str(hash(initial_auth_token) % 1000000)
         else:
             # Anonymous or default user
