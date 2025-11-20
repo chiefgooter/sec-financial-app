@@ -21,7 +21,9 @@ if 'target_cik' not in st.session_state:
     st.session_state.target_cik = "320193" # Default CIK for Apple
 if 'master_filings_df' not in st.session_state:
     st.session_state.master_filings_df = pd.DataFrame()
-if 'loaded_index_key' not in st.session_session_state:
+
+# FIX: Corrected typo from st.session_session_state to st.session_state
+if 'loaded_index_key' not in st.session_state: 
     st.session_state.loaded_index_key = ""
 
 # --- CIK Lookup Function (Using Search API for Stability) ---
@@ -48,19 +50,23 @@ def get_cik_data(ticker, headers):
         found_cik = None
         
         # --- ROBUST CIK EXTRACTION (Attempt 1: CIK label) ---
-        cik_match_1 = re.search(r'CIK:[^>]*?(\d{10})', response.text)
+        # Look for the CIK link directly (e.g., /edgar/data/0000320193/...)
+        cik_match_1 = re.search(r'/edgar/data/(\d{10})/', response.text)
         
         if cik_match_1:
             found_cik = cik_match_1.group(1)
             
-        # --- ROBUST CIK EXTRACTION (Attempt 2: Direct URL link) ---
+        # --- ROBUST CIK EXTRACTION (Attempt 2: CIK label with padded digits) ---
         if not found_cik:
-             cik_match_2 = re.search(r'/edgar/data/(\d{10})/', response.text)
+             cik_match_2 = re.search(r'CIK:[^>]*?(\d{1,10})', response.text)
              if cik_match_2:
-                found_cik = cik_match_2.group(1)
+                found_cik = cik_match_2.group(1).zfill(10) # Pad to 10 digits
         
         if found_cik:
-            return found_cik, f"Ticker Search: {ticker}" 
+            # Simple way to get the company name from the response title
+            name_match = re.search(r'<title>(.+?) - S', response.text)
+            company_name = name_match.group(1) if name_match else f"Ticker Search: {ticker}"
+            return found_cik, company_name
         
         return None, None
         
@@ -274,8 +280,10 @@ def search_cik_callback(app_name, email):
         found_cik, company_name = get_cik_data(ticker, HEADERS)
         
         if found_cik:
+            # Update the main CIK input and the target_cik state
+            st.session_state.cik_input_final = found_cik 
             st.session_state.target_cik = found_cik
-            st.success(f"CIK found: **{found_cik}**. Switch to the 'Company Filings & Metrics' tab to use it.")
+            st.success(f"CIK found: **{found_cik}** (Company: {company_name}). Switch to the 'Company Filings & Metrics' tab to use it.")
         else:
             st.session_state.target_cik = ""
             if not company_name:
@@ -356,10 +364,11 @@ def main():
         # CIK Input Section
         cik_input = st.text_input(
             "Central Index Key (CIK):", 
+            # Use the session state variable for the value to allow CIK Lookup to update it
             value=st.session_state.target_cik, 
             max_chars=10,
             placeholder="e.g., 320193",
-            key='cik_input_final'
+            key='cik_input_final' # Unique key for this input
         ).strip()
         
         if st.button("Fetch Financials & Filings"):
@@ -406,18 +415,18 @@ def main():
         
         # Updated index options to be more current (assuming today is late 2025)
         index_options = {
+            "2025 Q4 (Oct - Dec)": (2025, 4), # Added next quarter
             "2025 Q3 (July - Sep)": (2025, 3),
             "2025 Q2 (Apr - Jun)": (2025, 2),
             "2025 Q1 (Jan - Mar)": (2025, 1),
             "2024 Q4 (Oct - Dec)": (2024, 4),
             "2024 Q3 (July - Sep)": (2024, 3),
-            "2024 Q2 (Apr - Jun)": (2024, 2),
         }
         
         selected_key = st.selectbox(
             "Choose a Quarterly Master Index (Contains all filings for that 3-month period):",
             options=list(index_options.keys()),
-            index=0, 
+            index=1, # Default to a safe, already passed quarter
             key='index_quarter_select'
         )
         
