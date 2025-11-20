@@ -22,10 +22,40 @@ if 'target_cik' not in st.session_state:
     st.session_state.target_cik = "320193" # Default CIK for Apple
 if 'master_filings_df' not in st.session_state:
     st.session_state.master_filings_df = pd.DataFrame()
-
-# FIX: Corrected typo from st.session_session_state to st.session_state
 if 'loaded_index_key' not in st.session_state: 
     st.session_state.loaded_index_key = ""
+
+# NEW: Initialize the Watchlist state {CIK: Company Name}
+if 'watchlist' not in st.session_state:
+    st.session_state.watchlist = {
+        "320193": "APPLE INC.", 
+        "0001652044": "ALPHABET INC.",
+    }
+
+# --- WATCHLIST CRUD FUNCTIONS (Using Session State for Persistence Simulation) ---
+
+def add_to_watchlist(cik, company_name):
+    """Adds a CIK and company name to the session state watchlist."""
+    # Ensure CIK is padded to 10 digits
+    padded_cik = str(cik).zfill(10)
+    
+    # Check if already exists
+    if padded_cik in st.session_state.watchlist:
+        st.warning(f"**{company_name}** (CIK: {padded_cik}) is already in your Watchlist!")
+        return
+
+    # Add to watchlist (simulated database save)
+    st.session_state.watchlist[padded_cik] = company_name
+    st.success(f"Added **{company_name}** to Watchlist. (Current Count: {len(st.session_state.watchlist)})")
+
+def remove_from_watchlist(cik):
+    """Removes a CIK from the session state watchlist."""
+    padded_cik = str(cik).zfill(10)
+    if padded_cik in st.session_state.watchlist:
+        company_name = st.session_state.watchlist.pop(padded_cik)
+        st.toast(f"Removed {company_name} from Watchlist.")
+    # Force a re-run to refresh the Watchlist table display
+    st.rerun()
 
 # --- CALLBACK FUNCTIONS ---
 
@@ -35,10 +65,7 @@ def update_target_cik(cik):
     st.session_state.target_cik = str(cik).zfill(10)
     st.toast(f"CIK {cik} copied to the 'Company Filings' tab!")
 
-
 # --- CIK Lookup Function (Using Search API for Stability) ---
-# NOTE: This function remains as-is but is now isolated in the "CIK Lookup" tab due to instability.
-
 @st.cache_data(ttl=86400) # Cache CIK mapping for 24 hours to reduce load on SEC
 def get_cik_data(ticker, headers):
     """
@@ -49,7 +76,7 @@ def get_cik_data(ticker, headers):
     params = {
         'action': 'getcompany',
         'Company': ticker,
-        'output': 'xml' # Requesting XML output for easier parsing (it's actually a form of HTML)
+        'output': 'xml'
     }
 
     try:
@@ -59,21 +86,17 @@ def get_cik_data(ticker, headers):
 
         found_cik = None
         
-        # --- ROBUST CIK EXTRACTION (Attempt 1: CIK label) ---
-        # Look for the CIK link directly (e.g., /edgar/data/0000320193/...)
+        # --- ROBUST CIK EXTRACTION ---
         cik_match_1 = re.search(r'/edgar/data/(\d{10})/', response.text)
-        
         if cik_match_1:
             found_cik = cik_match_1.group(1)
-            
-        # --- ROBUST CIK EXTRACTION (Attempt 2: CIK label with padded digits) ---
+        
         if not found_cik:
              cik_match_2 = re.search(r'CIK:[^>]*?(\d{1,10})', response.text)
              if cik_match_2:
-                found_cik = cik_match_2.group(1).zfill(10) # Pad to 10 digits
+                found_cik = cik_match_2.group(1).zfill(10)
         
         if found_cik:
-            # Simple way to get the company name from the response title
             name_match = re.search(r'<title>(.+?) - S', response.text)
             company_name = name_match.group(1) if name_match else f"Ticker Search: {ticker}"
             return found_cik, company_name
@@ -118,7 +141,7 @@ def fetch_sec_company_facts(cik, headers):
         st.error(f"Error fetching data: {e}. Check network connection or SEC API status.")
         return None
 
-# --- NEW: Secondary Filing List Fetcher (More robust than facts API 'listFilings') ---
+# --- Secondary Filing List Fetcher (More robust than facts API 'listFilings') ---
 
 @st.cache_data(ttl=3600)
 def fetch_edgar_filings_list(cik, headers):
@@ -144,8 +167,11 @@ def fetch_edgar_filings_list(cik, headers):
         # Look for the main table containing the filing list
         filings_table = soup.find('table', class_='tableFile2')
         if not filings_table:
-            st.warning(f"Could not find the filing list table on the EDGAR page for CIK {cik}.")
+            # st.warning(f"Could not find the filing list table on the EDGAR page for CIK {cik}.")
             return []
+
+        # Simple way to get the company name from the table caption/header if not available elsewhere
+        company_name = soup.find('span', class_='companyName').text.split('CIK')[0].strip() if soup.find('span', class_='companyName') else f"CIK: {cik}"
 
         filings_data = []
         # Iterate over all rows, skipping the header row
@@ -162,6 +188,8 @@ def fetch_edgar_filings_list(cik, headers):
                     relative_href = document_link_tag.get('href')
                     document_link = f"https://www.sec.gov{relative_href}"
                     filings_data.append({
+                        'Company Name': company_name, # Added company name
+                        'CIK': padded_cik, # Added CIK
                         'Filing Type': form_type,
                         'Filing Date': date_filed,
                         'Link': document_link,
@@ -171,7 +199,7 @@ def fetch_edgar_filings_list(cik, headers):
         return filings_data
 
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching filings from EDGAR page for CIK {cik}: {e}")
+        # st.error(f"Error fetching filings from EDGAR page for CIK {cik}: {e}")
         return []
 
 # --- Function to fetch a recent Master Index File ---
@@ -243,8 +271,6 @@ def display_key_metrics(data, identifier):
         "Revenues": "Latest Reported Revenue",
         "Assets": "Latest Reported Total Assets",
         "NetIncomeLoss": "Latest Reported Net Income / Loss",
-        # Adding a popular non-GAAP-like proxy (if available, e.g. for certain types of companies)
-        # Note: True non-GAAP metrics are harder to extract directly from facts API without specific knowledge
         "EarningsPerShareBasic": "Latest EPS (Basic)"
     }
 
@@ -252,10 +278,9 @@ def display_key_metrics(data, identifier):
     
     for i, (gaap_tag, display_name) in enumerate(metrics_to_find.items()):
         
-        # The units can vary (e.g., USD, shares), so we prioritize USD for monetary values
         units_data = us_gaap.get(gaap_tag, {}).get('units', {})
         
-        # Try USD first, then try 'shares' for EPS, otherwise take the first available unit.
+        # Prioritize USD, then shares for EPS, otherwise the first available unit.
         metric_data = units_data.get('USD', [])
         if not metric_data and gaap_tag == "EarningsPerShareBasic":
             metric_data = units_data.get('shares', [])
@@ -312,8 +337,8 @@ def display_company_filings(data, cik, company_name, headers):
             })
     else:
         # 2. Fallback: Scrape the company's main EDGAR page (more reliable list)
-        st.warning("Structured filing list missing from the facts API. Falling back to EDGAR document search.")
-        with st.spinner("Fetching list of recent filings from the main EDGAR search page..."):
+        st.info("Structured filing list missing from the facts API. Falling back to EDGAR document search.")
+        with st.spinner(f"Fetching list of recent filings from the main EDGAR search page for CIK {cik}..."):
             filings_for_df = fetch_edgar_filings_list(cik, headers)
         
         if not filings_for_df:
@@ -382,8 +407,11 @@ def search_cik_callback(app_name, email):
             st.session_state.cik_input_final = found_cik 
             st.session_state.target_cik = found_cik
             st.success(f"CIK found: **{found_cik}** (Company: {company_name}). Switch to the 'Company Filings & Metrics' tab to use it.")
+            # Store found name for 'Add to Watchlist' button
+            st.session_state.last_searched_name = company_name
         else:
             st.session_state.target_cik = ""
+            st.session_state.last_searched_name = ""
             if not company_name:
                  st.error(f"Could not find a CIK for ticker: {ticker}. This feature is experimental due to SEC instability.")
 
@@ -426,7 +454,9 @@ def main():
     
     st.title("SEC EDGAR Data Viewer")
     
-    # --- Sidebar for SEC Compliance ---
+    # --- Sidebar for SEC Compliance and Watchlist Management ---
+    
+    # --- 1. Compliance Section
     st.sidebar.header("SEC Compliance (Required)")
     st.sidebar.markdown(
         "The SEC requires all API requests to include an identifying User-Agent. Please fill this out to ensure data fetching works."
@@ -446,9 +476,36 @@ def main():
     
     st.sidebar.markdown("---")
 
+    # --- 2. Watchlist Management Section (New Sidebar Feature)
+    st.sidebar.header("My Watchlist")
+    
+    # Watchlist Display/Removal
+    if st.session_state.watchlist:
+        st.sidebar.caption(f"Currently tracking **{len(st.session_state.watchlist)}** companies:")
+        
+        # Create a simple table or list for display and removal
+        watchlist_df = pd.DataFrame(st.session_state.watchlist.items(), columns=['CIK', 'Company'])
+        watchlist_df['Remove'] = '🗑️'
+        
+        # Streamlit component for removal action
+        edit_container = st.sidebar.container()
+        
+        # Allow removal from the sidebar
+        for cik, company_name in st.session_state.watchlist.items():
+            col1, col2 = st.sidebar.columns([3, 1])
+            col1.markdown(f"**{company_name}**")
+            col2.button("Remove", key=f"remove_{cik}", on_click=remove_from_watchlist, args=(cik,))
+        
+    else:
+        st.sidebar.info("Your watchlist is empty. Add companies from the 'Company Filings' tab.")
+
+    st.sidebar.markdown("---")
+
+
     # --- TAB STRUCTURE ---
-    tab_data, tab_daily_index, tab_lookup = st.tabs([
+    tab_data, tab_watchlist, tab_daily_index, tab_lookup = st.tabs([
         "Company Filings & Metrics", 
+        "My Watchlist Filings", # New Tab
         "Daily Filings Index",
         "CIK Lookup (Experimental)"
     ])
@@ -464,16 +521,35 @@ def main():
         )
         
         # CIK Input Section
-        cik_input = st.text_input(
+        col_cik, col_add = st.columns([5, 1])
+        
+        cik_input = col_cik.text_input(
             "Central Index Key (CIK):", 
-            # Use the session state variable for the value to allow CIK Lookup to update it
             value=st.session_state.target_cik, 
             max_chars=10,
             placeholder="e.g., 320193",
-            key='cik_input_final' # Unique key for this input
+            key='cik_input_final', # Unique key for this input
+            label_visibility="collapsed" # Hide label for better alignment
         ).strip()
         
-        if st.button("Fetch Financials & Filings"):
+        # Add to Watchlist Button
+        if cik_input and cik_input.isdigit():
+            # Try to use the company name from the last search, or look it up quickly if needed
+            company_name_to_add = st.session_state.watchlist.get(cik_input)
+            if not company_name_to_add:
+                 # Check if the name was set by the CIK lookup in the other tab
+                 company_name_to_add = st.session_state.get('last_searched_name', f"CIK {cik_input}")
+
+            col_add.button(
+                "Add to Watchlist", 
+                key='add_to_watchlist_button',
+                on_click=add_to_watchlist,
+                args=(cik_input, company_name_to_add),
+                help="Add the current company to your personal watchlist for tracking.",
+                use_container_width=True
+            )
+        
+        if st.button("Fetch Financials & Filings", key='fetch_single_cik_button'):
             target_cik = cik_input
             
             if not target_cik.isdigit():
@@ -492,12 +568,15 @@ def main():
                 company_name = company_data.get('entityName', 'N/A')
                 display_identifier = f"CIK: {target_cik}"
                 
+                # Set the last searched name for the 'Add to Watchlist' button
+                st.session_state.last_searched_name = company_name
+
                 # 1. Display Filings with Filter (Now uses the fallback function)
-                # Pass HEADERS and CIK so the fallback can work
                 display_company_filings(company_data, target_cik, company_name, HEADERS)
                 
                 # 2. Display Metrics
                 if 'facts' in company_data:
+                    st.markdown("---")
                     display_key_metrics(company_data, display_identifier)
                 else:
                     st.warning("Structured financial facts were not available for this period.")
@@ -507,186 +586,21 @@ def main():
                 <small>Data Source: SEC EDGAR API. CIK is required for API access.</small>
             """, unsafe_allow_html=True)
 
-    # --- 2. Daily Filings Index Tab (Non-Company Specific Feature) ---
-    with tab_daily_index:
-        st.header("Browse Recent SEC Filings Index")
+    # --- 2. My Watchlist Filings Tab (New Feature) ---
+    with tab_watchlist:
+        st.header("My Watchlist Filings")
         st.markdown(
             """
-            This section loads a list of thousands of filings from a recent SEC quarterly master index file, 
-            allowing you to view and filter filings across all companies.
+            This table displays the **most recent filings** for all companies currently in your Watchlist. 
+            The filings are aggregated and sorted by date.
             """
         )
         
-        # --- Index Selection ---
-        st.subheader("1. Load Quarterly Index")
-        
-        # Updated index options to be more current (assuming today is late 2025)
-        index_options = {
-            "2025 Q4 (Oct - Dec)": (2025, 4), # Added next quarter
-            "2025 Q3 (July - Sep)": (2025, 3),
-            "2025 Q2 (Apr - Jun)": (2025, 2),
-            "2025 Q1 (Jan - Mar)": (2025, 1),
-            "2024 Q4 (Oct - Dec)": (2024, 4),
-            "2024 Q3 (July - Sep)": (2024, 3),
-        }
-        
-        selected_key = st.selectbox(
-            "Choose a Quarterly Master Index (Contains all filings for that 3-month period):",
-            options=list(index_options.keys()),
-            index=1, # Default to a safe, already passed quarter
-            key='index_quarter_select'
-        )
-        
-        col_load, col_clear = st.columns([1, 1])
-        
-        # Use callback for cleaner state management on button click
-        col_load.button(
-            f"Load Filings for {selected_key}",
-            on_click=load_master_index_callback,
-            args=(selected_key, index_options),
-            key='load_index_button'
-        )
-        
-        col_clear.button("Clear Loaded Data", on_click=clear_master_index_callback)
+        watchlist_ciks = st.session_state.watchlist.keys()
 
-
-        # --- Display and Filter Loaded Data ---
-        df = st.session_state.master_filings_df
-        
-        if not df.empty:
-            
-            # Make sure 'Date Filed' is datetime for filtering
-            if df['Date Filed'].dtype != '<M8[ns]': # Check if not already datetime
-                 df['Date Filed'] = pd.to_datetime(df['Date Filed'])
-
-            st.markdown("---")
-            st.subheader(f"2. Filter Filings from Index ({st.session_state.loaded_index_key})")
-            
-            # --- 2.1 Date Range Filter (New Calendar Filter) ---
-            
-            # Determine min/max dates in the loaded DataFrame
-            min_date = df['Date Filed'].min().date()
-            max_date = df['Date Filed'].max().date()
-            
-            # Set default range to last 14 days or the full range if the index is old
-            today = date.today()
-            default_start = max(min_date, today - relativedelta(weeks=2))
-            default_end = max_date # Default end is the latest date in the loaded data
-
-            date_range = st.date_input(
-                f"Filter by Filing Date Range (Index Dates: {min_date} to {max_date}):",
-                value=[default_start, default_end],
-                min_value=min_date,
-                max_value=max_date,
-                key='master_date_range'
-            )
-            
-            df_filtered = df.copy()
-
-            if len(date_range) == 2:
-                start_date = pd.to_datetime(min(date_range))
-                # Add one day to the end date to include all filings on the end date
-                end_date = pd.to_datetime(max(date_range)) + pd.DateOffset(days=1)
-                
-                # Apply date filter
-                df_filtered = df[(df['Date Filed'] >= start_date) & (df['Date Filed'] < end_date)]
-            
-            st.caption(f"Filings matching the selected date range: {len(df_filtered):,}")
-
-            # --- 2.2 Content Filters (Form Type and Company Name) ---
-            filter_cols = st.columns(2)
-            
-            # Filter by Form Type
-            all_forms = sorted(df['Form Type'].unique()) # Use the original df to get all possible forms
-            
-            default_forms = [f for f in ['10-K', '10-Q', '8-K', '4', 'S-1', 'D'] if f in all_forms]
-            if not default_forms:
-                # If common forms aren't present in the master file, default to the top 5 types
-                default_forms = all_forms[:5]
-            
-            selected_forms = filter_cols[0].multiselect(
-                "Filter by Form Type:",
-                options=all_forms,
-                default=default_forms,
-                key='master_form_filter'
-            )
-            
-            # Filter by Company Name Search
-            search_query = filter_cols[1].text_input(
-                "Search Company Name/CIK:",
-                placeholder="e.g., Apple, 320193", # Updated placeholder
-                key='master_name_search'
-            )
-            
-            # Apply Form Type Filter
-            df_filtered = df_filtered[df_filtered['Form Type'].isin(selected_forms)]
-            
-            # Apply Company Name/CIK Filter
-            if search_query:
-                # Search across Company Name and CIK columns
-                df_filtered = df_filtered[
-                    df_filtered['Company Name'].str.contains(search_query, case=False, na=False) |
-                    df_filtered['CIK'].str.contains(search_query, case=False, na=False)
-                ]
-
-            # 3. Display Result
-            st.markdown("---")
-            st.subheader(f"3. Filtered Results")
-            st.caption(f"Displaying up to 500 records. Total matching records: **{len(df_filtered):,}**")
-            
-            # Sort by date for recent visibility and limit for display
-            df_display = df_filtered.sort_values(by='Date Filed', ascending=False).head(500)[['Company Name', 'Form Type', 'Date Filed', 'Link', 'CIK']].copy()
-            
-            # --- UX Improvement: Add a button column to copy CIK ---
-            df_display['Action'] = df_display['CIK'].apply(lambda x: f"CIK: {x}")
-            
-            st.dataframe(
-                df_display,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Link": st.column_config.LinkColumn("View Filing", display_text="Open Document"),
-                    "CIK": st.column_config.Column("CIK", width="small", disabled=True),
-                    # Use a button column to trigger the callback
-                    "Action": st.column_config.ButtonColumn(
-                        "Use CIK", 
-                        help="Click to set this CIK in the 'Company Filings & Metrics' tab.", 
-                        on_click=update_target_cik, 
-                        # Use the CIK column value as the argument for the callback
-                        args=['CIK']
-                    )
-                },
-                # Hide the original CIK column as it is now in the Action button
-                column_order=['Company Name', 'Form Type', 'Date Filed', 'Link', 'Action']
-            )
+        if not watchlist_ciks:
+            st.info("Your Watchlist is empty. Add companies in the sidebar or from the 'Company Filings & Metrics' tab.")
         else:
-             st.info("Click 'Load Filings' above to download a massive SEC quarterly index file for browsing. You must load the data before filtering.")
-        
-    # --- 3. CIK Lookup (Experimental) Tab ---
-    with tab_lookup:
-        st.header("Search CIK by Ticker (Experimental)")
-        st.warning(
-            """
-            **ATTENTION:** This feature is highly unstable. The SEC frequently blocks 
-            or changes the underlying search page, causing the ticker lookup to fail. 
-            Use the CIK directly on the main tab for reliable data fetching.
-            """
-        )
-        
-        ticker_input = st.text_input(
-            "Enter Stock Ticker:", 
-            value="",
-            max_chars=10,
-            placeholder="e.g., TSLA, MSFT, AMZN",
-            key='ticker_input' 
-        ).strip().upper()
-
-        st.button(
-            "Search CIK", 
-            on_click=search_cik_callback, 
-            args=(app_name, email),
-            key='search_cik_button'
-        )
-
-if __name__ == '__main__':
-    main()
+            if st.button(f"Fetch Filings for {len(watchlist_ciks)} Companies", key='fetch_watchlist_button'):
+                
+                all_filings = []
