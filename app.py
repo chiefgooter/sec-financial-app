@@ -3,13 +3,15 @@ import requests
 import json
 import pandas as pd
 from time import sleep
+from io import StringIO
+import re
 
 # --- Configuration & State ---
 # Initialize the user-agent headers. These will be updated from the sidebar inputs.
 HEADERS = {
     'User-Agent': 'DefaultAppName / default@example.com', # SEC compliance placeholder
     'Accept-Encoding': 'gzip, deflate',
-    'Host': 'www.sec.gov' # Changed host to sec.gov for search API
+    'Host': 'www.sec.gov'
 }
 
 # Initialize session state for CIK storage
@@ -23,9 +25,7 @@ if 'target_cik' not in st.session_state:
 def get_cik_data(ticker, headers):
     """
     Attempts to fetch the CIK and company name using the SEC's EDGAR full-text search.
-    This bypasses the highly unstable company_tickers.json file.
     """
-    # Use the SEC's general search API for a more stable lookup
     SEARCH_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
     
     params = {
@@ -36,12 +36,9 @@ def get_cik_data(ticker, headers):
 
     try:
         sleep(0.5) 
-        # Note: headers are adapted for the search endpoint
         response = requests.get(SEARCH_URL, headers=headers, params=params)
         response.raise_for_status()
 
-        # The response is HTML/XML, not JSON. We must parse it.
-        import re
         found_cik = None
         
         # --- ROBUST CIK EXTRACTION (Attempt 1: CIK label) ---
@@ -57,11 +54,8 @@ def get_cik_data(ticker, headers):
                 found_cik = cik_match_2.group(1)
         
         if found_cik:
-            # Since the search API doesn't easily return the clean name, 
-            # we'll use a placeholder and let the companyfacts API fill in the name later.
             return found_cik, f"Ticker Search: {ticker}" 
         
-        # Ticker not found
         return None, None
         
     except requests.exceptions.RequestException as e:
@@ -76,12 +70,10 @@ def get_cik_data(ticker, headers):
 def fetch_sec_company_facts(cik, headers):
     """
     Fetches the company facts JSON data from the SEC EDGAR API for a given CIK.
-    This endpoint also contains the recent filings list.
     """
     padded_cik = str(cik).zfill(10)
     FACTS_URL = f'https://data.sec.gov/api/xbrl/companyfacts/CIK{padded_cik}.json'
     
-    # Implementing a small delay to respect the SEC's rate limit of 10 requests/second
     sleep(0.5) 
     
     try:
@@ -103,6 +95,55 @@ def fetch_sec_company_facts(cik, headers):
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching data: {e}. Check network connection or SEC API status.")
         return None
+
+# --- Function to fetch a recent Master Index File ---
+
+@st.cache_data(ttl=86400) # Cache the massive index file for 24 hours
+def fetch_master_index_filings(year, qtr, headers):
+    """
+    Fetches and parses a quarterly master index file containing thousands of filings.
+    This provides a non-company-specific list of filings.
+    """
+    # NOTE: Using a fixed, known recent quarter's URL for stability. 
+    # Generating the current day's index link dynamically is very complex and fragile.
+    MASTER_INDEX_URL = f'https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{qtr}/master.idx'
+    
+    st.info(f"Fetching SEC Master Index for {year} Q{qtr}. This file contains thousands of filings and may take a moment to load.")
+    
+    sleep(0.5)
+    
+    try:
+        # Host header must be correct for the archives.sec.gov domain
+        data_headers = headers.copy()
+        data_headers['Host'] = 'www.sec.gov' # Still use sec.gov host for this endpoint
+        
+        response = requests.get(MASTER_INDEX_URL, headers=data_headers)
+        response.raise_for_status() 
+        
+        # The index file has fixed-width columns but is generally comma-separated after the header
+        content = response.text
+        
+        # Skip the first 10 lines of header information
+        content_lines = content.splitlines()
+        data_lines = content_lines[11:] 
+        
+        # Read the data into a DataFrame
+        data = StringIO("\n".join(data_lines))
+        df = pd.read_csv(data, sep='|', header=None, 
+                         names=['CIK', 'Company Name', 'Form Type', 'Date Filed', 'Filename'])
+        
+        # Create the full SEC URL link
+        def create_index_sec_link(row):
+             return f"https://www.sec.gov/Archives/{row['Filename']}"
+
+        df['Link'] = df.apply(create_index_sec_link, axis=1)
+
+        return df
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching Master Index for {year} Q{qtr}: {e}")
+        return pd.DataFrame()
+
 
 # --- Data Analysis and Presentation Function ---
 
@@ -140,9 +181,9 @@ def display_key_metrics(data, identifier):
             else:
                 st.metric(label=display_name, value="N/A")
 
-# --- Filings Presentation Function (NOW INCLUDES FILTERING) ---
+# --- Company Filings Presentation Function (NOW INCLUDES FILTERING) ---
 
-def display_filings(data, company_name):
+def display_company_filings(data, company_name):
     """
     Displays the recent company filings by extracting data from the 'companyfacts' JSON,
     and allows filtering by filing type.
@@ -173,7 +214,6 @@ def display_filings(data, company_name):
     df = pd.DataFrame(filings_for_df)
     
     # 1. Add Filing Type Filter
-    # Default to showing 10-K, 10-Q, and 8-K if they exist
     default_selection = [t for t in ['10-K', '10-Q', '8-K'] if t in all_filing_types]
     
     selected_types = st.multiselect(
@@ -207,13 +247,12 @@ def display_filings(data, company_name):
             "Link": st.column_config.LinkColumn("View Filing", display_text="Open Document")
         }
     )
-    st.caption(f"Showing {len(df_final)} of the most recent filtered filings.")
+    st.caption(f"Showing {len(df_final)} of the most recent filtered filings for {company_name}.")
 
 # --- CALLBACK FUNCTION FOR TICKET SEARCH ---
 def search_cik_callback(app_name, email):
     """
     Callback function executed when the 'Search CIK' button is pressed.
-    It performs the ticker lookup and updates st.session_state.target_cik.
     """
     ticker = st.session_state.ticker_input.strip().upper()
     
@@ -222,7 +261,6 @@ def search_cik_callback(app_name, email):
         st.session_state.target_cik = ""
         return
 
-    # --- Compliance check ---
     if app_name.strip() == "MySECApp" or email.strip() == "user@example.com":
          st.warning("Please update the Application Name and Contact Email in the sidebar for SEC compliance.")
 
@@ -242,8 +280,8 @@ def search_cik_callback(app_name, email):
 
 def main():
     st.set_page_config(
-        page_title="SEC EDGAR Financial Data App",
-        layout="centered",
+        page_title="SEC EDGAR Data Viewer",
+        layout="wide", # Use wide layout for better display of large dataframes
         initial_sidebar_state="expanded"
     )
     
@@ -252,7 +290,7 @@ def main():
     # --- Sidebar for SEC Compliance ---
     st.sidebar.header("SEC Compliance (Required)")
     st.sidebar.markdown(
-        "The SEC requires all API requests to include a identifying User-Agent. Please fill this out to ensure data fetching works."
+        "The SEC requires all API requests to include an identifying User-Agent. Please fill this out to ensure data fetching works."
     )
     
     if 'app_name' not in st.session_state:
@@ -269,14 +307,18 @@ def main():
     st.sidebar.markdown("---")
 
     # --- TAB STRUCTURE ---
-    tab_data, tab_lookup = st.tabs(["Company Filings & Metrics", "CIK Lookup (Experimental)"])
+    tab_data, tab_daily_index, tab_lookup = st.tabs([
+        "Company Filings & Metrics", 
+        "Daily Filings Index",
+        "CIK Lookup (Experimental)"
+    ])
 
     # --- 1. Company Filings & Metrics Tab (Main Working Feature) ---
     with tab_data:
         st.header("Fetch Data by CIK")
         st.markdown(
             """
-            This section uses the stable SEC API to fetch financial metrics and filings 
+            Use this section to fetch detailed financial metrics and recent filings 
             for a **single company** identified by its Central Index Key (CIK).
             """
         )
@@ -306,7 +348,7 @@ def main():
                 display_identifier = f"CIK: {target_cik}"
                 
                 # 1. Display Filings with Filter
-                display_filings(company_data, company_name)
+                display_company_filings(company_data, company_name)
                 
                 # 2. Display Metrics
                 if 'facts' in company_data:
@@ -319,7 +361,93 @@ def main():
                 <small>Data Source: SEC EDGAR API. CIK is required for API access.</small>
             """, unsafe_allow_html=True)
 
-    # --- 2. CIK Lookup (Experimental) Tab ---
+    # --- 2. Daily Filings Index Tab (New Non-Company Specific Feature) ---
+    with tab_daily_index:
+        st.header("Browse Recent SEC Filings Index")
+        st.markdown(
+            """
+            This section loads a list of thousands of filings from a recent SEC master index file, 
+            allowing you to view and filter filings across all companies.
+            """
+        )
+        
+        # --- Index Selection (Hardcoded for stability, but allowing choice) ---
+        st.subheader("Select Index Quarter")
+        
+        # The SEC is currently in Q4 2024, so let's offer a few recent quarters.
+        index_options = {
+            "2024 Q3 (July - Sep)": (2024, 3),
+            "2024 Q2 (Apr - Jun)": (2024, 2),
+            "2024 Q1 (Jan - Mar)": (2024, 1),
+        }
+        
+        selected_key = st.selectbox(
+            "Choose a Quarterly Master Index:",
+            options=list(index_options.keys()),
+            index=0 # Default to the most recent option
+        )
+        
+        year, qtr = index_options[selected_key]
+        
+        if st.button(f"Load Filings for {selected_key}"):
+            with st.spinner(f"Loading and parsing massive master index for {selected_key}..."):
+                master_df = fetch_master_index_filings(year, qtr, HEADERS)
+            
+            if not master_df.empty:
+                st.session_state.master_filings_df = master_df
+            else:
+                st.error("Could not load the Master Index file.")
+                st.session_state.master_filings_df = pd.DataFrame()
+
+        # --- Display and Filter Loaded Data ---
+        if 'master_filings_df' in st.session_state and not st.session_state.master_filings_df.empty:
+            df = st.session_state.master_filings_df
+            
+            st.markdown("---")
+            st.subheader(f"Filings Found: {len(df):,}")
+            
+            # 1. Filtering controls
+            filter_cols = st.columns(2)
+            
+            # Filter by Form Type
+            all_forms = sorted(df['Form Type'].unique())
+            default_forms = [f for f in ['10-K', '10-Q', '8-K', '4'] if f in all_forms]
+            
+            selected_forms = filter_cols[0].multiselect(
+                "Filter by Form Type:",
+                options=all_forms,
+                default=default_forms,
+                key='master_form_filter'
+            )
+            
+            # Filter by Company Name Search
+            search_query = filter_cols[1].text_input(
+                "Search Company Name:",
+                placeholder="e.g., Apple, Microsoft, Tesla",
+                key='master_name_search'
+            )
+            
+            df_filtered = df[df['Form Type'].isin(selected_forms)]
+            
+            if search_query:
+                df_filtered = df_filtered[df_filtered['Company Name'].str.contains(search_query, case=False, na=False)]
+
+            # 2. Display Result
+            st.caption(f"Displaying up to 500 records. Total matching records: {len(df_filtered):,}")
+            
+            df_display = df_filtered.head(500)[['Company Name', 'Form Type', 'Date Filed', 'Link', 'CIK']].copy()
+            
+            st.dataframe(
+                df_display,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Link": st.column_config.LinkColumn("View Filing", display_text="Open Document"),
+                    "CIK": st.column_config.Column("CIK", width="small")
+                }
+            )
+        
+    # --- 3. CIK Lookup (Experimental) Tab ---
     with tab_lookup:
         st.header("Search CIK by Ticker (Experimental)")
         st.warning(
