@@ -17,6 +17,10 @@ HEADERS = {
 # Initialize session state for CIK storage
 if 'target_cik' not in st.session_state:
     st.session_state.target_cik = "320193" # Default CIK for Apple
+if 'master_filings_df' not in st.session_state:
+    st.session_state.master_filings_df = pd.DataFrame()
+if 'loaded_index_key' not in st.session_state:
+    st.session_state.loaded_index_key = ""
 
 # --- CIK Lookup Function (Using Search API for Stability) ---
 # NOTE: This function remains as-is but is now isolated in the "CIK Lookup" tab due to instability.
@@ -104,8 +108,6 @@ def fetch_master_index_filings(year, qtr, headers):
     Fetches and parses a quarterly master index file containing thousands of filings.
     This provides a non-company-specific list of filings.
     """
-    # NOTE: Using a fixed, known recent quarter's URL for stability. 
-    # Generating the current day's index link dynamically is very complex and fragile.
     MASTER_INDEX_URL = f'https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{qtr}/master.idx'
     
     st.info(f"Fetching SEC Master Index for {year} Q{qtr}. This file contains thousands of filings and may take a moment to load.")
@@ -113,26 +115,27 @@ def fetch_master_index_filings(year, qtr, headers):
     sleep(0.5)
     
     try:
-        # Host header must be correct for the archives.sec.gov domain
         data_headers = headers.copy()
-        data_headers['Host'] = 'www.sec.gov' # Still use sec.gov host for this endpoint
+        data_headers['Host'] = 'www.sec.gov' 
         
         response = requests.get(MASTER_INDEX_URL, headers=data_headers)
         response.raise_for_status() 
         
-        # The index file has fixed-width columns but is generally comma-separated after the header
         content = response.text
         
-        # Skip the first 10 lines of header information
+        # Check if the content is just the header (i.e., the file is empty or too short)
+        if len(content.splitlines()) < 12:
+            st.warning("The fetched index file appears to be empty or incomplete (only headers found). Try a different quarter.")
+            return pd.DataFrame()
+
+        # Skip the first 11 lines of header information (lines 0-10)
         content_lines = content.splitlines()
         data_lines = content_lines[11:] 
         
-        # Read the data into a DataFrame
         data = StringIO("\n".join(data_lines))
         df = pd.read_csv(data, sep='|', header=None, 
                          names=['CIK', 'Company Name', 'Form Type', 'Date Filed', 'Filename'])
         
-        # Create the full SEC URL link
         def create_index_sec_link(row):
              return f"https://www.sec.gov/Archives/{row['Filename']}"
 
@@ -141,7 +144,8 @@ def fetch_master_index_filings(year, qtr, headers):
         return df
         
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching Master Index for {year} Q{qtr}: {e}")
+        st.error(f"Error fetching Master Index for {year} Q{qtr}: Failed to connect or received a bad response.")
+        st.caption(f"Details: {e}")
         return pd.DataFrame()
 
 
@@ -181,7 +185,7 @@ def display_key_metrics(data, identifier):
             else:
                 st.metric(label=display_name, value="N/A")
 
-# --- Company Filings Presentation Function (NOW INCLUDES FILTERING) ---
+# --- Company Filings Presentation Function ---
 
 def display_company_filings(data, company_name):
     """
@@ -275,6 +279,30 @@ def search_cik_callback(app_name, email):
             if not company_name:
                  st.error(f"Could not find a CIK for ticker: {ticker}. This feature is experimental due to SEC instability.")
 
+# --- CALLBACK FUNCTION TO LOAD MASTER INDEX ---
+def load_master_index_callback(selected_key, index_options):
+    """
+    Loads the master index data and stores it in session state.
+    """
+    year, qtr = index_options[selected_key]
+    
+    # Only reload if the key has changed
+    if st.session_state.loaded_index_key != selected_key:
+        
+        master_df = fetch_master_index_filings(year, qtr, HEADERS)
+        
+        if not master_df.empty:
+            st.session_state.master_filings_df = master_df
+            st.session_state.loaded_index_key = selected_key
+        else:
+            st.session_state.master_filings_df = pd.DataFrame()
+            st.session_state.loaded_index_key = ""
+            
+# --- CALLBACK FUNCTION TO CLEAR MASTER INDEX ---
+def clear_master_index_callback():
+    st.session_state.master_filings_df = pd.DataFrame()
+    st.session_state.loaded_index_key = ""
+
 
 # --- Streamlit Main App Layout ---
 
@@ -361,57 +389,62 @@ def main():
                 <small>Data Source: SEC EDGAR API. CIK is required for API access.</small>
             """, unsafe_allow_html=True)
 
-    # --- 2. Daily Filings Index Tab (New Non-Company Specific Feature) ---
+    # --- 2. Daily Filings Index Tab (Non-Company Specific Feature) ---
     with tab_daily_index:
         st.header("Browse Recent SEC Filings Index")
         st.markdown(
             """
-            This section loads a list of thousands of filings from a recent SEC master index file, 
+            This section loads a list of thousands of filings from a recent SEC quarterly master index file, 
             allowing you to view and filter filings across all companies.
             """
         )
         
-        # --- Index Selection (Hardcoded for stability, but allowing choice) ---
+        # --- Index Selection ---
         st.subheader("Select Index Quarter")
         
-        # The SEC is currently in Q4 2024, so let's offer a few recent quarters.
         index_options = {
             "2024 Q3 (July - Sep)": (2024, 3),
             "2024 Q2 (Apr - Jun)": (2024, 2),
             "2024 Q1 (Jan - Mar)": (2024, 1),
+            "2023 Q4 (Oct - Dec)": (2023, 4),
         }
         
         selected_key = st.selectbox(
             "Choose a Quarterly Master Index:",
             options=list(index_options.keys()),
-            index=0 # Default to the most recent option
+            index=0, 
+            key='index_quarter_select'
         )
         
-        year, qtr = index_options[selected_key]
+        col_load, col_clear = st.columns([1, 1])
         
-        if st.button(f"Load Filings for {selected_key}"):
-            with st.spinner(f"Loading and parsing massive master index for {selected_key}..."):
-                master_df = fetch_master_index_filings(year, qtr, HEADERS)
-            
-            if not master_df.empty:
-                st.session_state.master_filings_df = master_df
-            else:
-                st.error("Could not load the Master Index file.")
-                st.session_state.master_filings_df = pd.DataFrame()
+        if col_load.button(f"Load Filings for {selected_key}"):
+             # Use the callback to load the data
+             load_master_index_callback(selected_key, index_options)
+        
+        if col_clear.button("Clear Loaded Data"):
+            clear_master_index_callback()
+            st.rerun() # Rerun to clear the display immediately
 
         # --- Display and Filter Loaded Data ---
-        if 'master_filings_df' in st.session_state and not st.session_state.master_filings_df.empty:
-            df = st.session_state.master_filings_df
+        df = st.session_state.master_filings_df
+        
+        if not df.empty:
             
             st.markdown("---")
-            st.subheader(f"Filings Found: {len(df):,}")
+            st.subheader(f"Filings Found in Index: {len(df):,}")
+            st.caption(f"Currently displaying data for: **{st.session_state.loaded_index_key}**")
             
             # 1. Filtering controls
             filter_cols = st.columns(2)
             
             # Filter by Form Type
             all_forms = sorted(df['Form Type'].unique())
-            default_forms = [f for f in ['10-K', '10-Q', '8-K', '4'] if f in all_forms]
+            
+            # Set a more inclusive default to ensure *some* data shows if the common ones aren't in the sample
+            default_forms = [f for f in ['10-K', '10-Q', '8-K', '4', 'S-1', 'D'] if f in all_forms]
+            if not default_forms:
+                default_forms = all_forms[:5] # Default to the first 5 types if common ones aren't present
             
             selected_forms = filter_cols[0].multiselect(
                 "Filter by Form Type:",
@@ -430,6 +463,7 @@ def main():
             df_filtered = df[df['Form Type'].isin(selected_forms)]
             
             if search_query:
+                # Use .str.lower() for case-insensitive search if company name is not fully capitalized
                 df_filtered = df_filtered[df_filtered['Company Name'].str.contains(search_query, case=False, na=False)]
 
             # 2. Display Result
@@ -446,6 +480,8 @@ def main():
                     "CIK": st.column_config.Column("CIK", width="small")
                 }
             )
+        else:
+             st.info("Click 'Load Filings' above to download a massive SEC quarterly index file for browsing.")
         
     # --- 3. CIK Lookup (Experimental) Tab ---
     with tab_lookup:
