@@ -4,6 +4,10 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, collection, query, where, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
 import { Menu, TrendingUp, Search, X, FileText, LayoutDashboard } from 'lucide-react';
 
+// FIX: Define the model name using string concatenation to bypass the SyntaxError
+// caused by the '09' token being misinterpreted as an invalid octal number.
+const FLASH_MODEL_NAME = "gemini-2.5-flash-preview-" + "09" + "-2025"; 
+
 // Global variables provided by the Canvas environment
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
@@ -62,7 +66,9 @@ const SecFilingsTab = ({ setMessage }) => {
         const systemPrompt = "Act as an expert financial analyst. Find the most recent 10-K and 10-Q SEC filings for the specified company. Summarize the key risks and opportunities from the 'Management's Discussion and Analysis' section of each filing into concise, detailed bullet points. Include at least two key points for both risks and opportunities from each filing type (10-K and 10-Q). Only return the summarized analysis text, followed by a list of citation URIs.";
         const userQuery = `Find the latest 10-K and 10-Q filings for the company with ticker ${ticker}.`;
         const apiKey = "";
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+        
+        // Use the concatenation constant here
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${FLASH_MODEL_NAME}:generateContent?key=${apiKey}`;
 
         const payload = {
             contents: [{ parts: [{ text: userQuery }] }],
@@ -242,7 +248,9 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
         const systemPrompt = "You are a financial data provider. Respond to the user's search query for a stock ticker or company name with a JSON array of stock objects. Each object must contain 'ticker', 'companyName', 'currentPrice' (a mock USD value), and 'dailyChange' (a mock percentage string like '+1.50%'). Use real and popular stock data, but mock the price fields.";
         const userQuery = `Find stocks matching the ticker or name: "${debouncedSearchTerm}". Provide only the JSON array.`;
         const apiKey = "";
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+        
+        // Use the concatenation constant here
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${FLASH_MODEL_NAME}:generateContent?key=${apiKey}`;
 
         setIsLoading(true);
         setResults([]);
