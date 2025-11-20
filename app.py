@@ -12,19 +12,21 @@ HEADERS = {
     'Host': 'data.sec.gov'
 }
 
-# --- CIK Lookup Function (Retaining the code, but making it less central) ---
+# --- NEW: CIK Lookup Function ---
 
-@st.cache_data(ttl=86400) # Cache CIK mapping for 24 hours
+@st.cache_data(ttl=86400) # Cache CIK mapping for 24 hours to reduce load on SEC
 def get_cik_data(ticker, headers):
     """
-    Attempts to fetch the CIK and company name from the SEC's ticker file.
-    This function is known to fail frequently due to SEC URL changes/downtime.
+    Attempts to fetch the CIK and company name from the SEC's official ticker file.
+    
+    NOTE: This lookup file is occasionally unavailable or the URL changes, 
+    which is why CIK input remains the most reliable method.
     """
-    # The most common, yet currently unstable, endpoint for the ticker list
+    # The official SEC endpoint for the ticker list
     TICKER_TO_CIK_URL = "https://www.sec.gov/files/company-tickers.json" 
     
     try:
-        sleep(0.1) 
+        sleep(0.1) # Respecting the SEC limit
         response = requests.get(TICKER_TO_CIK_URL, headers=headers)
         response.raise_for_status()
 
@@ -46,13 +48,13 @@ def get_cik_data(ticker, headers):
         st.caption(f"Details: {e}")
         return None, None
 
-# --- Core Financial Facts Data Fetching Function (Now the primary and only data source) ---
+# --- Core Financial Facts Data Fetching Function (Primary data source) ---
 
 @st.cache_data(ttl=3600) # Cache the facts data for 1 hour
 def fetch_sec_company_facts(cik, headers):
     """
     Fetches the company facts JSON data from the SEC EDGAR API for a given CIK.
-    This endpoint also contains the recent filings list, making it the most stable option.
+    This endpoint also contains the recent filings list.
     """
     padded_cik = str(cik).zfill(10)
     FACTS_URL = f'https://data.sec.gov/api/xbrl/companyfacts/CIK{padded_cik}.json'
@@ -118,7 +120,7 @@ def display_key_metrics(data, identifier):
             else:
                 st.metric(label=display_name, value="N/A")
 
-# --- UPDATED: Filings Presentation Function (Uses companyfacts data) ---
+# --- Filings Presentation Function ---
 
 def display_filings(data, company_name):
     """
@@ -186,7 +188,7 @@ def main():
     )
     
     st.title("SEC EDGAR Data Viewer")
-    st.markdown("This app uses the most stable SEC endpoint to retrieve both key financial metrics and recent filings.")
+    st.markdown("Use the CIK search for guaranteed results. Ticker search relies on an often-unstable SEC mapping file.")
     
     # --- Sidebar for SEC Compliance ---
     st.sidebar.header("SEC Compliance (Required)")
@@ -220,7 +222,7 @@ def main():
     ).strip()
     
     # 2. Input for Ticker (Convenience method)
-    st.header("Search by Ticker (Optional)")
+    st.header("Search by Ticker")
     ticker_input = st.text_input(
         "Enter Stock Ticker:", 
         value="",
@@ -242,18 +244,19 @@ def main():
         
         # Priority 2: Use Ticker lookup if CIK is empty
         elif ticker_input:
-            # Check for compliance warning
+            # --- Compliance check when using Ticker lookup (which hits the SEC file) ---
             if app_name.strip() == "MySECApp" or email.strip() == "user@example.com":
                  st.warning("Please update the Application Name and Contact Email in the sidebar for SEC compliance.")
 
             with st.spinner(f"Attempting ticker lookup for {ticker_input}..."):
-                # 1. Lookup CIK from Ticker (uses the potentially failing SEC file)
+                # 1. Lookup CIK from Ticker
                 target_cik, company_name = get_cik_data(ticker_input, HEADERS)
                 
                 if target_cik:
                     display_identifier = f"Ticker: {ticker_input}"
                 else:
-                    # Error is already displayed inside get_cik_data if the file failed
+                    # If target_cik is None, an error/warning has already been displayed inside get_cik_data
+                    st.error(f"Could not find a CIK for ticker: {ticker_input}.")
                     return
         
         else:
