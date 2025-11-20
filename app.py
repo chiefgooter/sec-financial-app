@@ -4,7 +4,7 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, collection, query, where, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
 import { Menu, TrendingUp, Search, X, FileText, LayoutDashboard } from 'lucide-react';
 
-// Define the model name safely to prevent any parser misinterpretation (fixed in previous step)
+// Define the model name safely
 const FLASH_MODEL_NAME = "gemini-2.5-flash-preview-0" + "9" + "-2025"; 
 
 // Global variables provided by the Canvas environment
@@ -168,28 +168,10 @@ const SecFilingsTab = ({ setMessage }) => {
                 <div className="mt-6 bg-gray-700 p-5 rounded-lg">
                     <h3 className="text-xl font-bold mb-3 text-yellow-200 border-b border-gray-600 pb-2">Analysis Summary</h3>
                     
-                    {/* Inject Analysis Content from LLM */}
+                    {/* Inject Analysis Content from LLM. Now using the global style class for formatting. */}
                     <div className="analysis-content text-gray-300 mb-6" dangerouslySetInnerHTML={{ __html: filingData.text }} />
                     
-                    {/* CRITICAL: Custom CSS for Markdown rendering. This block is safe */}
-                    <style>{`
-                        /* CSS injected here to ensure proper formatting of LLM markdown output */
-                        .analysis-content p { margin-bottom: 16px; }
-                        .analysis-content ul { 
-                            list-style: disc; 
-                            margin-left: 24px; 
-                            padding-left: 0; 
-                            margin-top: 8px;
-                        }
-                        .analysis-content ul li { margin-bottom: 8px; }
-                        .analysis-content h3 { 
-                            font-size: 1.25rem; 
-                            font-weight: 700; 
-                            margin-top: 24px; 
-                            margin-bottom: 8px; 
-                            color: #fcd34d; /* yellow-300 */
-                        }
-                    `}</style>
+                    {/* Custom style block removed to fix compilation error */}
                     
                     <h3 className="text-lg font-semibold mt-4 mb-2 text-gray-300">Cited Sources ({filingData.sources.length})</h3>
                     <ul className="space-y-1 text-sm">
@@ -321,7 +303,6 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
                 const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
 
                 if (text) {
-                    // *** FIX: Use the robust safeJsonParse function here ***
                     const parsedJson = safeJsonParse(text);
 
                     if (Array.isArray(parsedJson)) {
@@ -513,6 +494,7 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
                         className="w-full p-3 mb-4 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-green-500 focus:border-green-500"
                     />
                     
+                    {/* Note: custom-scrollbar class relies on global styles in App component */}
                     <div className="space-y-3 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                         {isLoading && <p className="text-center py-4 text-green-400">Searching...</p>}
                         {!isLoading && results.length === 0 && searchTerm.length > 0 && (
@@ -528,6 +510,7 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
                 <div className="bg-gray-800 p-6 rounded-xl shadow-2xl">
                     <h2 className="text-xl font-bold mb-4 text-indigo-300">My Watchlist ({watchlist.length})</h2>
                     
+                    {/* Note: custom-scrollbar class relies on global styles in App component */}
                     <div className="space-y-3 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                         {!isAuthReady && (
                             <p className="text-center py-4 text-yellow-400 font-medium">
@@ -547,24 +530,6 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
                     </div>
                 </div>
             </div>
-            
-            <style>{`
-                /* Custom Scrollbar Styles for the Lists */
-                .custom-scrollbar::-webkit-scrollbar {
-                    width: 8px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-track {
-                    background: #374151;
-                    border-radius: 10px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-thumb {
-                    background: #34d399; /* green-400 for Watchlist */
-                    border-radius: 10px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-                    background: #10b981; 
-                }
-            `}</style>
         </div>
     );
 };
@@ -757,6 +722,42 @@ const App = () => {
                     {renderContent()}
                 </main>
             </div>
+
+            {/* Global Style Block (Consolidated Custom CSS for stability) */}
+            <style>{`
+                /* Styles for LLM-generated Markdown content */
+                .analysis-content p { margin-bottom: 1rem; }
+                .analysis-content ul { 
+                    list-style: disc; 
+                    margin-left: 1.5rem; /* 24px */
+                    padding-left: 0; 
+                    margin-top: 0.5rem; /* 8px */
+                }
+                .analysis-content ul li { margin-bottom: 0.5rem; }
+                .analysis-content h3 { 
+                    font-size: 1.25rem; 
+                    font-weight: 700; 
+                    margin-top: 1.5rem; 
+                    margin-bottom: 0.5rem; 
+                    color: #fcd34d; /* yellow-300 */
+                }
+                
+                /* Custom Scrollbar Styles for the Lists */
+                .custom-scrollbar::-webkit-scrollbar {
+                    width: 8px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-track {
+                    background: #374151;
+                    border-radius: 10px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb {
+                    background: #34d399; /* green-400 for Watchlist */
+                    border-radius: 10px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+                    background: #10b981; 
+                }
+            `}</style>
         </div>
     );
 };
