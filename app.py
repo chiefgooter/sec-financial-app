@@ -4,15 +4,12 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, collection, query, where, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
 import { Menu, TrendingUp, Search, X, FileText, LayoutDashboard } from 'lucide-react';
 
-// FIX: Define the model name by splitting the "09" part into two strings 
-// to prevent "09" from being interpreted as an invalid octal literal by a restrictive parser.
-// The resulting string is "gemini-2.5-flash-preview-09-2025"
+// Define the model name safely to prevent any parser misinterpretation (fixed in previous step)
 const FLASH_MODEL_NAME = "gemini-2.5-flash-preview-0" + "9" + "-2025"; 
 
 // Global variables provided by the Canvas environment
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-// The initialAuthToken is a JWT string, not JSON, so we use it directly.
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // --- UTILITY FUNCTIONS ---
@@ -47,8 +44,39 @@ const withExponentialBackoff = async (fn, retries = 3, delay = 1000) => {
     }
 };
 
+/**
+ * Safely parses a string that might contain JSON, stripping markdown fences (```json) first.
+ * @param {string} text 
+ * @returns {object | null}
+ */
+const safeJsonParse = (text) => {
+    if (!text) return null;
+    
+    // 1. Remove markdown code fences if they exist (e.g., ```json ... ```)
+    let cleanedText = text.trim();
+    if (cleanedText.startsWith('```')) {
+        const lines = cleanedText.split('\n');
+        // Check for common markers like '```json' or '```'
+        if (lines.length > 1 && (lines[0].startsWith('```json') || lines[0] === '```')) {
+            lines.shift(); // Remove starting fence
+            if (lines[lines.length - 1] === '```') {
+                lines.pop(); // Remove ending fence
+            }
+        }
+        cleanedText = lines.join('\n').trim();
+    }
+    
+    // 2. Attempt standard JSON parsing
+    try {
+        return JSON.parse(cleanedText);
+    } catch (e) {
+        console.error("Failed to parse JSON after cleanup:", e, "Original text:", text);
+        return null; 
+    }
+};
 
-// --- 1. SEC FILINGS Tab Component (Your Existing Logic) ---
+
+// --- 1. SEC FILINGS Tab Component ---
 
 const SecFilingsTab = ({ setMessage }) => {
     const [ticker, setTicker] = useState('MSFT');
@@ -69,7 +97,6 @@ const SecFilingsTab = ({ setMessage }) => {
         const userQuery = `Find the latest 10-K and 10-Q filings for the company with ticker ${ticker}.`;
         const apiKey = "";
         
-        // Use the safe concatenation constant here
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${FLASH_MODEL_NAME}:generateContent?key=${apiKey}`;
 
         const payload = {
@@ -121,7 +148,6 @@ const SecFilingsTab = ({ setMessage }) => {
         }
     }, [ticker, setMessage]);
     
-    // Fetch initial data on mount (or when ticker changes)
     useEffect(() => {
         if (ticker && isInitialLoad) {
             fetchSecFilings();
@@ -178,7 +204,7 @@ const SecFilingsTab = ({ setMessage }) => {
                                     title={source.title}
                                 >
                                     {source.title}
-                                </a> {/* REMOVED the extra } here */}
+                                </a> 
                             </li>
                         ))}
                     </ul>
@@ -222,7 +248,7 @@ const SecFilingsTab = ({ setMessage }) => {
 };
 
 
-// --- 2. Watchlist Component (Content for the Stock Watchlist Tab) ---
+// --- 2. Watchlist Component ---
 
 const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
     
@@ -252,7 +278,6 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
         const userQuery = `Find stocks matching the ticker or name: "${debouncedSearchTerm}". Provide only the JSON array.`;
         const apiKey = "";
         
-        // Use the safe concatenation constant here
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${FLASH_MODEL_NAME}:generateContent?key=${apiKey}`;
 
         setIsLoading(true);
@@ -292,22 +317,23 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
 
-                const responseText = await response.text();
-                if (!responseText.trim()) {
-                    throw new Error("Empty response body from API.");
-                }
-                
-                const result = JSON.parse(responseText);
+                const result = await response.json();
                 const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
 
                 if (text) {
-                    const parsedJson = JSON.parse(text);
+                    // *** FIX: Use the robust safeJsonParse function here ***
+                    const parsedJson = safeJsonParse(text);
+
                     if (Array.isArray(parsedJson)) {
                         setResults(parsedJson.map(stock => ({
                             ...stock,
                             id: stock.ticker, 
                         })));
+                    } else if (parsedJson) {
+                        // Handle case where LLM returns a single object instead of an array
+                        setResults([{...parsedJson, id: parsedJson.ticker}]);
                     }
+                    
                 } else {
                     throw new Error("Model response was empty or malformed.");
                 }
