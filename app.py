@@ -23,11 +23,10 @@ def get_cik_data(ticker, headers):
     """
     Attempts to fetch the CIK and company name from the SEC's official ticker file.
     
-    FIX: The old URL (company-tickers.json) was broken (404). 
-    We are now using the new, more reliable endpoint: company-tickers-submitted.json
+    FIX: The SEC moved the file again. We are now using the latest, known reliable endpoint.
     """
-    # Updated reliable URL for the SEC Ticker-to-CIK mapping
-    TICKER_TO_CIK_URL = "https://www.sec.gov/files/company-tickers-submitted.json" 
+    # LATEST updated reliable URL for the SEC Ticker-to-CIK mapping
+    TICKER_TO_CIK_URL = "https://www.sec.gov/files/company_tickers.json" 
     
     try:
         sleep(0.1) 
@@ -37,19 +36,21 @@ def get_cik_data(ticker, headers):
         ticker_data = response.json()
         ticker_upper = ticker.upper()
         
-        # The structure of this file is a dictionary where the key is a running index
-        for item in ticker_data.values():
-            if item['ticker'] == ticker_upper:
+        # The structure of this file is a list of dictionaries.
+        # This new file structure is slightly different from the previous one,
+        # so the lookup logic needs to be adjusted.
+        for item in ticker_data:
+            # Note the keys changed from 'cik' to 'cik_str' and 'title' to 'name' in this new file
+            if item.get('ticker') == ticker_upper:
                 # Returns the CIK (padded to 10 digits) and the company title
-                return str(item['cik']).zfill(10), item['title']
+                return str(item.get('cik_str')).zfill(10), item.get('name')
         
         return None, None # Ticker not found
         
     except requests.exceptions.RequestException as e:
         # If the lookup file fails, we display a soft error and return None
         st.warning("⚠️ Ticker Lookup Service Down ⚠️")
-        # Display the error but hide the specific, potentially confusing URL detail for the user
-        st.error(f"Error: The SEC ticker lookup file is currently unavailable. Please enter the company's CIK manually.")
+        st.error(f"Error: The SEC ticker lookup file is currently unavailable (or the URL has changed again). Please enter the company's CIK manually.")
         st.caption(f"Details: {e}")
         return None, None
 
