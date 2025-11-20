@@ -493,7 +493,7 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
                         className="w-full p-3 mb-4 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-green-500 focus:border-green-500"
                     />
                     
-                    {/* Replaced custom-scrollbar with standard overflow class */}
+                    {/* Standard overflow class */}
                     <div className="space-y-3 h-[300px] overflow-y-auto pr-2">
                         {isLoading && <p className="text-center py-4 text-green-400">Searching...</p>}
                         {!isLoading && results.length === 0 && searchTerm.length > 0 && (
@@ -509,7 +509,7 @@ const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
                 <div className="bg-gray-800 p-6 rounded-xl shadow-2xl">
                     <h2 className="text-xl font-bold mb-4 text-indigo-300">My Watchlist ({watchlist.length})</h2>
                     
-                    {/* Replaced custom-scrollbar with standard overflow class */}
+                    {/* Standard overflow class */}
                     <div className="space-y-3 h-[300px] overflow-y-auto pr-2">
                         {!isAuthReady && (
                             <p className="text-center py-4 text-yellow-400 font-medium">
