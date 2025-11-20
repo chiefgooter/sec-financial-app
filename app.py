@@ -11,20 +11,7 @@
         body {
             font-family: 'Inter', sans-serif;
         }
-        /* Custom styles to make the scrollbar slightly less harsh (necessary for accessibility in dark mode) */
-        .custom-scrollbar::-webkit-scrollbar {
-            width: 8px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-            background: #1f2937; /* gray-800 */
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-            background: #4b5563; /* gray-600 */
-            border-radius: 4px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-            background: #6b7280; /* gray-500 */
-        }
+        
         /* Style for the analysis content (prose equivalent) */
         .analysis-content h1, .analysis-content h2, .analysis-content h3 {
             font-weight: bold;
@@ -48,7 +35,7 @@
 <body class="bg-gray-900 text-white antialiased">
 
     <div id="app" class="flex h-screen">
-        <!-- Sidebar (Controlled by JS) -->
+        <!-- Sidebar -->
         <div id="sidebar" class="fixed inset-y-0 left-0 transform -translate-x-full w-0 transition-all duration-300 ease-in-out z-30 
                              bg-gray-800 border-r border-gray-700 shadow-xl md:relative md:flex-shrink-0 md:translate-x-0 md:w-64">
             
@@ -61,7 +48,7 @@
                 </div>
 
                 <nav id="nav-items" class="space-y-2 flex-grow">
-                    <!-- Nav Items will be dynamically populated/controlled -->
+                    <!-- Nav Items will be dynamically populated -->
                 </nav>
 
                 <div class="mt-4 pt-4 border-t border-gray-700">
@@ -83,7 +70,7 @@
             </header>
 
             <!-- Message Box (Global) -->
-            <div id="message-box" class="p-3 mx-auto mt-4 max-w-4xl rounded-lg shadow-md border z-10 hidden cursor-pointer" onclick="document.getElementById('message-box').classList.add('hidden')">
+            <div id="message-box" class="fixed top-4 right-4 z-50 p-4 rounded-lg shadow-xl text-white transform translate-x-full opacity-0 pointer-events-none transition duration-300 ease-in-out border">
                 <p id="message-text" class="font-medium text-center"></p>
             </div>
             
@@ -95,7 +82,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, query, where, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- GLOBAL CONFIGURATION AND STATE ---
         const FLASH_MODEL_NAME = "gemini-2.5-flash-preview-09-2025";
@@ -109,23 +96,44 @@
         let isAuthReady = false;
         let activeTab = 'filings';
         
-        // --- UI UTILITIES ---
+        // --- UI UTILITIES (FIXED FOR DOMTOKENLIST ERROR) ---
 
+        /**
+         * Displays a temporary notification message on the screen.
+         * @param {string} type - 'success', 'error', or 'info'.
+         * @param {string} text - The message content.
+         */
         function showMessage(type, text) {
             const box = document.getElementById('message-box');
             const textElement = document.getElementById('message-text');
-            box.classList.remove('hidden', 'bg-red-800', 'border-red-600', 'bg-green-800', 'border-green-600', 'bg-blue-800', 'border-blue-600');
+
+            // Define Tailwind classes for success and error states
+            const successClasses = ['bg-green-800', 'border-green-600'];
+            const errorClasses = ['bg-red-800', 'border-red-600'];
+            const infoClasses = ['bg-blue-800', 'border-blue-600'];
+
+            // Determine classes based on type
+            let newClasses;
+            if (type === 'success') newClasses = successClasses;
+            else if (type === 'error') newClasses = errorClasses;
+            else newClasses = infoClasses;
+
+            // 1. Remove all old color classes to reset state
+            box.classList.remove(...successClasses, ...errorClasses, ...infoClasses);
             
-            let colorClasses = '';
-            if (type === 'error') colorClasses = 'bg-red-800 border-red-600';
-            else if (type === 'success') colorClasses = 'bg-green-800 border-green-600';
-            else colorClasses = 'bg-blue-800 border-blue-600';
-
-            box.classList.add(colorClasses);
+            // 2. Add the new color classes one by one using the spread operator (Fix for InvalidCharacterError)
+            box.classList.add(...newClasses); 
+            
             textElement.textContent = text;
+            
+            // Show the box
+            box.classList.remove('translate-x-full', 'opacity-0', 'pointer-events-none');
+            box.classList.add('translate-x-0', 'opacity-100', 'pointer-events-auto');
 
+            // Hide the box after 5 seconds
             setTimeout(() => {
-                box.classList.add('hidden');
+                box.classList.remove('translate-x-0', 'opacity-100', 'pointer-events-auto');
+                box.classList.add('translate-x-full', 'opacity-0', 'pointer-events-none');
             }, 5000);
         }
 
@@ -142,35 +150,6 @@
                 }
             }
         };
-        
-        function safeJsonParse(text) {
-            if (!text) return null;
-            let cleanedText = text.trim();
-            if (cleanedText.startsWith('```')) {
-                const lines = cleanedText.split('\n');
-                if (lines.length > 1 && (lines[0].startsWith('```json') || lines[0] === '```')) {
-                    lines.shift(); 
-                    if (lines[lines.length - 1] === '```') {
-                        lines.pop(); 
-                    }
-                }
-                cleanedText = lines.join('\n').trim();
-            }
-            try {
-                return JSON.parse(cleanedText);
-            } catch (e) {
-                console.error("Failed to parse JSON after cleanup:", e, "Original text:", text);
-                return null; 
-            }
-        }
-        
-        function useDebounce(func, delay) {
-            let timeout;
-            return function(...args) {
-                clearTimeout(timeout);
-                timeout = setTimeout(() => func.apply(this, args), delay);
-            };
-        }
 
         // --- FIREBASE INITIALIZATION ---
 
@@ -181,6 +160,7 @@
             }
 
             try {
+                // setLogLevel('Debug'); // Uncomment for debugging
                 firebaseApp = initializeApp(firebaseConfig);
                 db = getFirestore(firebaseApp);
                 auth = getAuth(firebaseApp);
@@ -216,7 +196,7 @@
             }
         }
 
-        // --- 1. SEC FILINGS TAB LOGIC ---
+        // --- SEC FILINGS TAB LOGIC ---
 
         async function fetchSecFilings(ticker) {
             const resultsDiv = document.getElementById('filings-results');
@@ -363,318 +343,21 @@
             });
 
             // Auto-trigger MSFT analysis on load
-            fetchSecFilings('MSFT');
-        }
-
-
-        // --- 2. WATCHLIST TAB LOGIC ---
-        
-        let currentWatchlist = [];
-        let unsubscribeWatchlist = null;
-
-        function getWatchlistCollectionRef() {
-            if (!db || !userId) return null;
-            return collection(db, 'artifacts', appId, 'public', 'data', 'stockWatchlists');
-        }
-
-        // Search API (Debounced)
-        const performSearch = useDebounce(async (searchTerm) => {
-            const searchResultsDiv = document.getElementById('search-results');
-            if (!searchTerm) {
-                searchResultsDiv.innerHTML = '';
-                return;
-            }
-
-            searchResultsDiv.innerHTML = '<p class="text-center py-4 text-green-400">Searching...</p>';
-
-            const systemPrompt = "You are a financial data provider. Respond to the user's search query for a stock ticker or company name with a JSON array of stock objects. Each object must contain 'ticker', 'companyName', 'currentPrice' (a mock USD value), and 'dailyChange' (a mock percentage string like '+1.50%'). Use real and popular stock data, but mock the price fields. Return ONLY the JSON array.";
-            const userQuery = `Find stocks matching the ticker or name: "${searchTerm}".`;
-            const apiKey = "";
-            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${FLASH_MODEL_NAME}:generateContent?key=${apiKey}`;
-
-            const payload = {
-                contents: [{ parts: [{ text: userQuery }] }],
-                tools: [{ "google_search": {} }],
-                systemInstruction: { parts: [{ text: systemPrompt }] },
-                generationConfig: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                        type: "ARRAY",
-                        items: {
-                            type: "OBJECT",
-                            properties: {
-                                "ticker": { "type": "STRING" },
-                                "companyName": { "type": "STRING" },
-                                "currentPrice": { "type": "STRING" },
-                                "dailyChange": { "type": "STRING" }
-                            }
-                        }
-                    }
-                }
-            };
-
-            try {
-                const apiCall = async () => {
-                    const response = await fetch(apiUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-                    
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-
-                    const result = await response.json();
-                    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-                    const parsedJson = safeJsonParse(text);
-                    
-                    let stocks = Array.isArray(parsedJson) ? parsedJson : [];
-                    
-                    renderSearchResults(stocks);
-                };
-                
-                await withExponentialBackoff(apiCall);
-
-            } catch (error) {
-                console.error("Stock search API error:", error);
-                showMessage('error', `Search failed: ${error.message}`);
-                searchResultsDiv.innerHTML = '<p class="text-center py-4 text-red-400">Error fetching stocks.</p>';
-            }
-        }, 500);
-
-        // Firestore Watchlist Listener
-        function startWatchlistListener() {
-            if (unsubscribeWatchlist) unsubscribeWatchlist();
-            
-            if (!isAuthReady || !db || !userId) {
-                renderWatchlist(currentWatchlist, false); // Render loading state
-                return;
-            }
-
-            const watchlistRef = getWatchlistCollectionRef();
-            if (!watchlistRef) return;
-
-            const q = query(watchlistRef, where("userId", "==", userId));
-
-            unsubscribeWatchlist = onSnapshot(q, (querySnapshot) => {
-                const items = [];
-                querySnapshot.forEach((doc) => {
-                    items.push({ id: doc.id, ...doc.data() });
-                });
-                items.sort((a, b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0));
-                currentWatchlist = items;
-                renderWatchlist(items, true);
-            }, (error) => {
-                console.error("Firestore Watchlist Listener Error:", error);
-                showMessage('error', 'Failed to load watchlist in real-time.');
-            });
-        }
-        
-        // Firestore Mutations
-        async function addToWatchlist(stock) {
-            if (!db || !userId) {
-                showMessage('error', 'Database not connected.');
-                return;
-            }
-            if (currentWatchlist.some(item => item.ticker === stock.ticker)) {
-                showMessage('info', `${stock.ticker} is already on your watchlist.`);
-                return;
-            }
-            const watchlistRef = getWatchlistCollectionRef();
-            try {
-                await addDoc(watchlistRef, {
-                    userId: userId,
-                    ticker: stock.ticker,
-                    companyName: stock.companyName,
-                    currentPrice: stock.currentPrice,
-                    dailyChange: stock.dailyChange,
-                    timestamp: serverTimestamp()
-                });
-                showMessage('success', `${stock.ticker} added to watchlist!`);
-            } catch (error) {
-                console.error("Error adding document: ", error);
-                showMessage('error', `Failed to add ${stock.ticker}.`);
+            if (isAuthReady) {
+                fetchSecFilings('MSFT');
             }
         }
 
-        async function removeFromWatchlist(itemId, ticker) {
-            if (!db || !userId) {
-                showMessage('error', 'Database not connected.');
-                return;
-            }
-            const watchlistRef = getWatchlistCollectionRef();
-            try {
-                await deleteDoc(doc(watchlistRef, itemId));
-                showMessage('success', `${ticker} removed from watchlist.`);
-            } catch (error) {
-                console.error("Error removing document: ", error);
-                showMessage('error', 'Failed to remove item.');
-            }
-        }
-
-        // --- WATCHLIST RENDERING ---
-
-        function getChangeClass(change) {
-            if (!change) return 'text-gray-400';
-            return change.startsWith('+') ? 'text-green-400' : 'text-red-400';
-        }
-
-        function createStockCard(stock, isWatchlist) {
-            const card = document.createElement('div');
-            card.className = 'flex justify-between items-center p-3 bg-gray-700/50 rounded-lg shadow-md border border-gray-600/50 space-x-3 w-full';
-            
-            const isAdded = currentWatchlist.some(item => item.ticker === stock.ticker);
-
-            card.innerHTML = `
-                <div class='flex-1 min-w-0'>
-                    <p class="text-xl font-extrabold text-white truncate">${stock.ticker}</p>
-                    <p class="text-sm text-gray-400 truncate">${stock.companyName}</p>
-                </div>
-                <div class='flex flex-col items-end min-w-[120px]'>
-                    <p class="font-bold text-lg text-indigo-300">${stock.currentPrice}</p>
-                    <p class="text-sm font-medium ${getChangeClass(stock.dailyChange)}">
-                        ${stock.dailyChange}
-                    </p>
-                </div>
-            `;
-            
-            const actionContainer = document.createElement('div');
-            
-            if (isWatchlist) {
-                actionContainer.innerHTML = `
-                    <button class="remove-btn bg-red-600 hover:bg-red-700 text-white text-sm font-medium py-1 px-3 rounded-full transition duration-150 flex-shrink-0">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg> Remove
-                    </button>
-                `;
-                const removeBtn = actionContainer.querySelector('.remove-btn');
-                removeBtn.addEventListener('click', () => removeFromWatchlist(stock.id, stock.ticker));
-            } else {
-                const buttonText = isAdded ? 'Remove' : 'Add';
-                const buttonClass = isAdded 
-                    ? 'bg-red-600 hover:bg-red-700 text-white' 
-                    : 'bg-green-600 hover:bg-green-700 text-white';
-
-                actionContainer.innerHTML = `
-                    <button class="action-btn text-sm font-medium py-1 px-3 rounded-full transition duration-150 flex-shrink-0 ${buttonClass}">
-                        ${buttonText}
-                    </button>
-                `;
-                const actionBtn = actionContainer.querySelector('.action-btn');
-                actionBtn.addEventListener('click', () => {
-                    if (isAdded) {
-                        const existingItem = currentWatchlist.find(item => item.ticker === stock.ticker);
-                        if (existingItem) removeFromWatchlist(existingItem.id, existingItem.ticker);
-                    } else {
-                        addToWatchlist(stock);
-                    }
-                });
-            }
-            card.appendChild(actionContainer);
-            return card;
-        }
-
-        function renderSearchResults(stocks) {
-            const searchResultsDiv = document.getElementById('search-results');
-            searchResultsDiv.innerHTML = ''; 
-
-            if (stocks.length === 0) {
-                searchResultsDiv.innerHTML = '<p class="text-center py-4 text-gray-400">No results found. Try a different ticker or company.</p>';
-                return;
-            }
-
-            stocks.forEach(stock => {
-                searchResultsDiv.appendChild(createStockCard(stock, false));
-            });
-        }
-
-        function renderWatchlist(items, isReady) {
-            const watchlistDiv = document.getElementById('watchlist-items');
-            watchlistDiv.innerHTML = '';
-            
-            if (!isReady) {
-                watchlistDiv.innerHTML = '<p class="text-center py-4 text-yellow-400 font-medium">Establishing secure database connection...</p>';
-                return;
-            }
-
-            if (items.length === 0) {
-                watchlistDiv.innerHTML = '<p class="text-center py-4 text-gray-400">Your watchlist is empty! Add some stocks.</p>';
-                return;
-            }
-
-            items.forEach(item => {
-                watchlistDiv.appendChild(createStockCard(item, true));
-            });
-        }
-
-        function renderStockWatchlistTab() {
-            const contentArea = document.getElementById('content-area');
-            contentArea.innerHTML = `
-                <div class="p-4 sm:p-6 md:p-8 bg-gray-900 min-h-full">
-                    <h1 class="text-3xl font-extrabold mb-6 text-green-400 border-b border-gray-700 pb-3">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-3"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><path d="M17 6h6v6"/></svg>
-                        Stock Watchlist
-                    </h1>
-
-                    <div class="grid md:grid-cols-2 gap-8">
-                        <!-- Search Panel -->
-                        <div class="bg-gray-800 p-6 rounded-xl shadow-2xl">
-                            <h2 class="text-xl font-bold mb-4 text-green-300 flex items-center">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg> Search Stocks
-                            </h2>
-                            <input
-                                id="search-input"
-                                type="text"
-                                placeholder="e.g., AAPL, GOOG, Tesla"
-                                class="w-full p-3 mb-4 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-green-500 focus:border-green-500"
-                            />
-                            <div id="search-results" class="space-y-3 h-[300px] overflow-y-auto custom-scrollbar pr-2">
-                                <!-- Search results will be rendered here -->
-                            </div>
-                        </div>
-
-                        <!-- Watchlist Panel -->
-                        <div class="bg-gray-800 p-6 rounded-xl shadow-2xl">
-                            <h2 class="text-xl font-bold mb-4 text-indigo-300">My Watchlist (<span id="watchlist-count">0</span>)</h2>
-                            <div id="watchlist-items" class="space-y-3 h-[300px] overflow-y-auto custom-scrollbar pr-2">
-                                <!-- Watchlist items will be rendered here -->
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            
-            const searchInput = document.getElementById('search-input');
-            searchInput.addEventListener('input', (e) => performSearch(e.target.value));
-
-            // Initial rendering of watchlist (starts the listener)
-            startWatchlistListener();
-            document.getElementById('watchlist-items').addEventListener('DOMNodeInserted', () => {
-                document.getElementById('watchlist-count').textContent = currentWatchlist.length;
-            });
-            document.getElementById('watchlist-items').addEventListener('DOMNodeRemoved', () => {
-                document.getElementById('watchlist-count').textContent = currentWatchlist.length;
-            });
-            
-            // Re-render the initial empty search state
-            renderSearchResults([]);
-        }
 
         // --- GLOBAL NAVIGATION AND ROUTING ---
 
-        const tabConfig = {
-            'main': { title: 'Dashboard', icon: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7-4.4 4.8"/></svg>', render: renderDashboard, color: 'bg-indigo-600', text: 'text-indigo-400' },
-            'watchlist': { title: 'Stock Watchlist', icon: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><path d="M17 6h6v6"/></svg>', render: renderStockWatchlistTab, color: 'bg-green-600', text: 'text-green-400' },
-            'filings': { title: 'SEC Filings', icon: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>', render: renderSecFilingsTab, color: 'bg-yellow-600', text: 'text-yellow-400' },
-        };
-        
         function renderDashboard() {
             const contentArea = document.getElementById('content-area');
             contentArea.innerHTML = `
                 <div class="p-8 bg-gray-900 min-h-full flex flex-col items-center justify-center">
                     <h1 class="text-4xl font-bold text-indigo-400 mb-4">Financial Dashboard</h1>
                     <p class="text-gray-400 text-lg text-center max-w-md">
-                        This integrated tool provides real-time stock tracking and SEC filing analysis.
+                        This integrated tool provides SEC filing analysis.
                     </p>
                     <p class="text-gray-400 text-lg text-center max-w-md mt-2">
                         Use the sidebar to navigate between features.
@@ -682,6 +365,12 @@
                 </div>
             `;
         }
+
+        const tabConfig = {
+            'main': { title: 'Dashboard', icon: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7-4.4 4.8"/></svg>', render: renderDashboard, color: 'bg-indigo-600' },
+            'filings': { title: 'SEC Filings', icon: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>', render: renderSecFilingsTab, color: 'bg-yellow-600' },
+        };
+        
         
         function renderTab(tabName) {
             activeTab = tabName;
