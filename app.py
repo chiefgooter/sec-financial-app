@@ -166,7 +166,7 @@ const SecFilingsTab = ({ setMessage }) => {
                                     target="_blank" 
                                     rel="noopener noreferrer" 
                                     className="text-blue-400 hover:text-blue-300 truncate"
-                                    title={source.uri}
+                                    title={source.title}
                                 >
                                     {source.title}
                                 </a>
