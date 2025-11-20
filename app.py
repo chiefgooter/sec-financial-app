@@ -1,850 +1,707 @@
-import streamlit as st
-import requests
-import json
-import pandas as pd
-from time import sleep
-from io import StringIO
-import re
-from datetime import date
-from dateutil.relativedelta import relativedelta
-from bs4 import BeautifulSoup
-import numpy as np # Used for handling NaN in DataFrame operations
+import React, { useState, useEffect, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, query, where, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { Menu, TrendingUp, Search, X, FileText, LayoutDashboard } from 'lucide-react';
 
-# --- Firebase Imports ---
-try:
-    import firebase_admin
-    from firebase_admin import initialize_app, firestore, credentials
-except ImportError:
-    # If firebase-admin is not installed, the app will run without watchlist functionality
-    firebase_admin = None
+// Global variables provided by the Canvas environment
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-# --- Configuration & State ---
-HEADERS = {
-    'User-Agent': 'DefaultAppName / default@example.com', # SEC compliance placeholder
-    'Accept-Encoding': 'gzip, deflate',
-    'Host': 'www.sec.gov'
-}
+// --- UTILITY FUNCTIONS ---
 
-CIK_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-SUBMISSION_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+const useDebounce = (func, delay) => {
+    const handler = React.useRef(null);
+    const callback = React.useRef(func);
 
-def initialize_session_state():
-    """
-    Initializes all necessary session state variables robustly.
-    This prevents common Streamlit AttributeErrors on startup.
-    """
-    
-    # Financial Data
-    if 'target_cik' not in st.session_state:
-        st.session_state.target_cik = "320193" # Default CIK for Apple
-    if 'master_filings_df' not in st.session_state:
-        st.session_state.master_filings_df = pd.DataFrame()
-    if 'loaded_index_key' not in st.session_state: 
-        st.session_state.loaded_index_key = ""
-        
-    # Firebase and Watchlist
-    if 'watchlists' not in st.session_state:
-        st.session_state.watchlists = {} # {list_name: {cik: name}}
-    if 'selected_watchlist' not in st.session_state:
-        st.session_state.selected_watchlist = None
-    if 'firebase_initialized' not in st.session_state:
-        st.session_state.firebase_initialized = False
-    if 'db' not in st.session_state:
-        st.session_state.db = None
-    if 'user_id' not in st.session_state:
-        st.session_state.user_id = None
-    if 'watchlists_loading' not in st.session_state:
-        st.session_state.watchlists_loading = False
-    if 'app_name' not in st.session_state: 
-        st.session_state.app_name = "Financial-Data-App"
-    if 'email' not in st.session_state: 
-        st.session_state.email = "user@example.com"
+    useEffect(() => {
+        callback.current = func;
+    }, [func]);
 
-
-# --- FIREBASE INITIALIZATION HANDLER (FIXED) ---
-
-def initialize_firebase():
-    """Initializes Firebase and authenticates the user."""
-    if st.session_state.firebase_initialized or not firebase_admin:
-        return st.session_state.firebase_initialized
-
-    try:
-        # Load config and app ID from global environment variables
-        app_id = globals().get('__app_id', 'default-app-id')
-        firebase_config_str = globals().get('__firebase_config', '{}')
-        firebase_config = json.loads(firebase_config_str)
-        initial_auth_token = globals().get('__initial_auth_token', None)
-        
-        if not firebase_config or not firebase_config.get('projectId'):
-            st.session_state.db = None
-            st.session_state.firebase_initialized = False
-            return False
-
-        try:
-            # Check if app is already initialized. Use get_app to retrieve.
-            app = firebase_admin.get_app(name=app_id)
-        except ValueError:
-            # If not initialized, initialize it safely.
-            app = initialize_app(options={'projectId': firebase_config['projectId']}, name=app_id) 
-        except Exception as e:
-            st.error(f"Failed to initialize Firebase app: {e}")
-            st.session_state.db = None
-            st.session_state.firebase_initialized = False
-            return False
-
-        st.session_state.db = firestore.client(app=app)
-        st.session_state.app_id = app_id
-        
-        # Determine User ID (simulated using the provided auth token)
-        if initial_auth_token:
-            st.session_state.user_id = "canvas_user_" + str(hash(initial_auth_token) % 1000000)
-        else:
-            st.session_state.user_id = "anon_user" 
-
-        st.session_state.firebase_initialized = True
-        return True
-
-    except Exception as e:
-        st.error(f"Error initializing Firebase. Watchlists will not be saved: {e}")
-        st.session_state.db = None
-        st.session_state.firebase_initialized = False
-        return False
-
-# --- WATCHLIST HANDLERS ---
-
-def get_watchlist_collection_ref():
-    """Returns the Firestore collection reference for the user's private watchlists."""
-    if not st.session_state.db or not st.session_state.user_id:
-        return None
-        
-    app_id = st.session_state.app_id
-    user_id = st.session_state.user_id
-    
-    # Private data path: /artifacts/{appId}/users/{userId}/watchlists
-    collection_path = f"artifacts/{app_id}/users/{user_id}/watchlists"
-    return st.session_state.db.collection(collection_path)
-
-
-@st.cache_data(ttl=600) # Cache watchlist data for 10 minutes
-def load_watchlists():
-    """Loads all watchlists for the current user from Firestore."""
-    if st.session_state.watchlists_loading:
-        return st.session_state.watchlists
-        
-    st.session_state.watchlists_loading = True
-    
-    col_ref = get_watchlist_collection_ref()
-    if not col_ref:
-        st.session_state.watchlists_loading = False
-        return {}
-
-    try:
-        docs = col_ref.stream()
-        watchlists = {}
-        for doc in docs:
-            data = doc.to_dict()
-            if 'companies' in data:
-                watchlists[doc.id] = data['companies']
-        
-        st.session_state.watchlists = watchlists
-        st.session_state.watchlists_loading = False
-        return watchlists
-
-    except Exception as e:
-        st.error(f"Error loading watchlists: {e}")
-        st.session_state.watchlists_loading = False
-        return {}
-
-def save_watchlist(name, companies):
-    """Saves or updates a single watchlist to Firestore."""
-    col_ref = get_watchlist_collection_ref()
-    if not col_ref:
-        st.error("Database connection not available to save watchlist.")
-        return False
-        
-    try:
-        doc_ref = col_ref.document(name)
-        doc_ref.set({"companies": companies})
-        st.toast(f"Watchlist '{name}' saved successfully!")
-        load_watchlists.clear() # Clear cache to force reload
-        st.session_state.watchlists[name] = companies
-        return True
-    except Exception as e:
-        st.error(f"Error saving watchlist '{name}': {e}")
-        return False
-
-def add_company_to_watchlist_callback():
-    """Callback to add a company to the currently selected watchlist."""
-    list_name = st.session_state.watchlist_select_box 
-    cik_to_add = st.session_state.company_cik_input.strip()
-    company_name_input = st.session_state.company_name_input.strip()
-
-    if not list_name or list_name == "<No Watchlists>":
-        st.warning("Please select or create a watchlist first.")
-        return
-
-    if not cik_to_add or not cik_to_add.isdigit():
-        st.warning("Please enter a valid CIK (Central Index Key).")
-        return
-
-    # 1. Update the local state
-    current_list = st.session_state.watchlists.get(list_name, {})
-    # Pad CIK to 10 digits as required by SEC filing data
-    current_list[cik_to_add.zfill(10)] = company_name_input or f"CIK {cik_to_add.zfill(10)}"
-    st.session_state.watchlists[list_name] = current_list
-    
-    # 2. Save to Firestore
-    if save_watchlist(list_name, current_list):
-        st.toast(f"Added {company_name_input} to '{list_name}'.")
-        st.session_state.company_cik_input = ""
-        st.session_state.company_name_input = "" 
-
-def create_watchlist_callback():
-    """Callback to create a new watchlist."""
-    new_name = st.session_state.new_watchlist_name.strip()
-    if not new_name:
-        st.error("Watchlist name cannot be empty.")
-        return
-    if new_name in st.session_state.watchlists:
-        st.error(f"Watchlist '{new_name}' already exists.")
-        return
-    
-    if save_watchlist(new_name, {}):
-        st.session_state.selected_watchlist = new_name 
-        st.session_state.new_watchlist_name = ""
-
-def delete_company_from_watchlist_callback(cik_to_delete):
-    """Callback to delete a company from the currently selected watchlist."""
-    list_name = st.session_state.selected_watchlist
-    
-    if not list_name or list_name not in st.session_state.watchlists:
-        st.error("No watchlist selected or found.")
-        return
-
-    current_list = st.session_state.watchlists[list_name]
-    if cik_to_delete in current_list:
-        company_name = current_list.pop(cik_to_delete)
-        st.session_state.watchlists[list_name] = current_list
-        
-        # Save the updated list back to Firestore
-        if save_watchlist(list_name, current_list):
-            st.toast(f"Removed {company_name} from '{list_name}'.")
-    else:
-        st.warning(f"CIK {cik_to_delete} not found in '{list_name}'.")
-
-# --- GENERAL CALLBACK FUNCTIONS ---
-
-def update_target_cik(cik):
-    """Callback to set the CIK input and main CIK state for the other tab."""
-    st.session_state.cik_input_final = str(cik).zfill(10)
-    st.session_state.target_cik = str(cik).zfill(10)
-    st.toast(f"CIK {cik} copied to the 'Company Filings & Metrics' tab!")
-
-# --- DATA FETCHING FUNCTIONS ---
-
-@st.cache_data(ttl=86400)
-def get_cik_data(ticker, headers):
-    """Fetches the CIK and company name using the SEC's EDGAR search."""
-    SEARCH_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
-    params = {'action': 'getcompany', 'Company': ticker, 'output': 'xml'}
-
-    try:
-        sleep(0.5) 
-        response = requests.get(SEARCH_URL, headers=headers, params=params)
-        response.raise_for_status()
-
-        found_cik = None
-        # Use regex to find the CIK in the document URL part of the response text
-        cik_match_1 = re.search(r'/edgar/data/(\d{10})/', response.text)
-        
-        if cik_match_1:
-            found_cik = cik_match_1.group(1)
-        
-        if found_cik:
-            # Try to extract the company name from the title tag
-            name_match = re.search(r'<title>(.+?) - S', response.text)
-            company_name = name_match.group(1) if name_match else f"Ticker Search: {ticker}"
-            return found_cik, company_name
-        
-        return None, None
-        
-    except requests.exceptions.RequestException as e:
-        # st.error(f"Error during Ticker Lookup: {e}") # Suppressing console errors for cleaner UI
-        return None, None
-
-def search_cik_callback(app_name, email):
-    """Callback for the CIK Lookup button in the CIK Lookup tab."""
-    ticker_input = st.session_state.ticker_input_p
-    if not ticker_input:
-        st.warning("Please enter a stock ticker.")
-        return
-
-    with st.spinner(f"Searching for CIK for {ticker_input}..."):
-        local_headers = {'User-Agent': f'{app_name} / {email}', 'Accept-Encoding': 'gzip, deflate', 'Host': 'www.sec.gov'}
-        cik, company_name = get_cik_data(ticker_input, local_headers)
-
-        if cik:
-            st.success(f"Found CIK for {company_name}: **{cik}**")
-            st.session_state.target_cik = cik
-            st.session_state.cik_lookup_result = f"CIK: {cik}, Company: {company_name}"
-            st.session_state.cik_input_final = cik 
-        else:
-            st.error(f"Could not find a CIK for ticker: {ticker_input}")
-            st.session_state.cik_lookup_result = f"Could not find CIK for {ticker_input}"
-
-
-@st.cache_data(ttl=3600)
-def fetch_sec_company_facts(cik, headers):
-    """
-    Fetches the full company facts JSON from the SEC for detailed metrics.
-    """
-    padded_cik = str(cik).zfill(10)
-    url = CIK_FACTS_URL.format(cik=padded_cik)
-    
-    sleep(0.5) # SEC compliance
-    
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        # st.error(f"Error fetching company facts for CIK {padded_cik}: {e}")
-        return None
-
-def extract_metric(facts_json, taxonomy, tag, unit='USD'):
-    """
-    Extracts the latest value and period for a specific financial metric.
-    """
-    if facts_json is None: return None, None
-
-    try:
-        data = facts_json['facts'][taxonomy][tag]['units'][unit]
-        
-        data_sorted = sorted(data, key=lambda x: pd.to_datetime(x.get('end', '1900-01-01'), errors='coerce'), reverse=True)
-        
-        for entry in data_sorted:
-            if 'val' in entry:
-                return entry['val'], entry.get('end', 'N/A')
-        
-        return None, None 
-        
-    except KeyError:
-        return None, None 
-
-
-def display_key_metrics(facts_json):
-    """
-    Displays key financial metrics in a readable format.
-    """
-    if facts_json is None:
-        return
-
-    company_name = facts_json.get('entityData', {}).get('name', 'N/A')
-    st.subheader(f"Key Metrics for {company_name}")
-
-    metrics_to_fetch = [
-        ("Assets (Total)", "us-gaap", "Assets", 'USD'),
-        ("Revenues (TTM)", "us-gaap", "Revenues", 'USD'),
-        ("Net Income (TTM)", "us-gaap", "NetIncomeLoss", 'USD'),
-        ("Cash (Latest)", "us-gaap", "CashAndCashEquivalentsAtCarryingValue", 'USD')
-    ]
-
-    metric_data = []
-    
-    for label, taxonomy, tag, unit in metrics_to_fetch:
-        value, date_end = extract_metric(facts_json, taxonomy, tag, unit)
-        
-        if value is not None:
-            formatted_value = f"${value:,.0f}" if abs(value) > 1000 else f"${value:,.2f}"
-        else:
-            formatted_value = "N/A"
-        
-        metric_data.append({"Metric": label, "Value": formatted_value, "As of": date_end or 'N/A'})
-
-    df_metrics = pd.DataFrame(metric_data)
-    
-    cols = st.columns(len(df_metrics))
-    for i, row in df_metrics.iterrows():
-        cols[i].metric(
-            label=row['Metric'], 
-            value=row['Value'], 
-            delta=f"As of {row['As of']}"
-        )
-
-
-@st.cache_data(ttl=3600)
-def fetch_edgar_filings_list(cik, headers):
-    """Scrapes the company's EDGAR document list page for recent filings."""
-    padded_cik = str(cik).zfill(10)
-    EDGAR_URL = f'https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={padded_cik}&type=&dateb=&owner=exclude&count=100'
-    
-    sleep(0.5) 
-    
-    try:
-        data_headers = headers.copy()
-        data_headers['Host'] = 'www.sec.gov' 
-        response = requests.get(EDGAR_URL, headers=data_headers)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        filings_table = soup.find('table', class_='tableFile2')
-        if not filings_table: return []
-
-        filings_data = []
-        for row in filings_table.find_all('tr')[1:]:
-            cols = row.find_all('td')
-            if len(cols) >= 5:
-                form_type = cols[0].text.strip()
-                date_filed = cols[3].text.strip()
-                document_link_tag = cols[1].find('a')
-                if document_link_tag:
-                    relative_href = document_link_tag.get('href')
-                    document_link = f"https://www.sec.gov{relative_href}"
-                    filings_data.append({
-                        'CIK': padded_cik, 
-                        'Company Name': '', 
-                        'Filing Type': form_type,
-                        'Filing Date': date_filed,
-                        'Link': document_link,
-                        'Description': 'Link to Index File' 
-                    })
-        
-        return filings_data
-
-    except requests.exceptions.RequestException as e:
-        # st.error(f"Error fetching EDGAR list: {e}")
-        return []
-
-def display_company_filings(facts_json, cik, company_name, headers):
-    """Displays the recent company filings using the robust scraping method."""
-    st.markdown("---")
-    st.header(f"Recent Filings ({company_name})")
-
-    with st.spinner(f"Fetching list of recent filings for {company_name}..."):
-        st.info("Using the robust EDGAR document search to ensure we capture all recent filings.")
-        filings_for_df = fetch_edgar_filings_list(cik, headers)
-        
-    if not filings_for_df:
-        st.warning("No recent filings data available.")
-        return
-
-    df = pd.DataFrame(filings_for_df)
-    df['Company Name'] = company_name
-
-    all_filing_types = set(df['Filing Type'].unique())
-    default_selection = [t for t in ['10-K', '10-Q', '8-K', '4', 'S-1'] if t in all_filing_types]
-    if not default_selection and all_filing_types:
-        default_selection = sorted(list(all_filing_types))[:3]
-    
-    selected_types = st.multiselect(
-        "Filter Filings by Type:",
-        options=sorted(list(all_filing_types)),
-        default=default_selection,
-        key='single_company_form_filter'
-    )
-
-    if not selected_types:
-        st.warning("Select one or more filing types to display.")
-        return
-        
-    df_filtered = df[df['Filing Type'].isin(selected_types)]
-    df_display = df_filtered.head(20).copy()
-
-    df_final = df_display[['Filing Type', 'Filing Date', 'Link']]
-    
-    st.dataframe(
-        df_final,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Link": st.column_config.LinkColumn("View Filing", display_text="Open Document")
+    return useCallback((...args) => {
+        if (handler.current) {
+            clearTimeout(handler.current);
         }
-    )
-    st.caption(f"Showing {len(df_final)} of the most recent filtered filings for {company_name}.")
+        handler.current = setTimeout(() => {
+            callback.current(...args);
+        }, delay);
+    }, [delay]);
+};
+
+const withExponentialBackoff = async (fn, retries = 3, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (error) {
+            if (i === retries - 1) throw error; 
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= 2;
+        }
+    }
+};
 
 
-# --- Master Index Functions ---
+// --- 1. SEC FILINGS Tab Component (Your Existing Logic) ---
 
-@st.cache_data(ttl=86400)
-def fetch_master_index_filings(year, qtr, headers):
-    """Fetches and parses a quarterly master index file."""
-    MASTER_INDEX_URL = f'https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{qtr}/master.idx'
-    st.info(f"Fetching SEC Master Index for {year} Q{qtr}. This file contains thousands of filings and may take a moment to load.")
-    sleep(0.5)
-    
-    try:
-        data_headers = headers.copy()
-        data_headers['Host'] = 'www.sec.gov' 
-        response = requests.get(MASTER_INDEX_URL, headers=data_headers)
-        response.raise_for_status() 
-        content = response.text
-        
-        if len(content.splitlines()) < 12:
-            st.warning("The fetched index file appears to be empty or incomplete. Try a different quarter.")
-            return pd.DataFrame()
+const SecFilingsTab = ({ setMessage }) => {
+    const [ticker, setTicker] = useState('MSFT');
+    const [filingData, setFilingData] = useState(null); // Stores {text, sources}
+    const [isLoading, setIsLoading] = useState(false);
+    const [isInitialLoad, setIsInitialLoad] = useState(true);
 
-        content_lines = content.splitlines()
-        data_lines = content_lines[11:] 
-        
-        data = StringIO("\n".join(data_lines))
-        df = pd.read_csv(data, sep='|', header=None, 
-                         names=['CIK', 'Company Name', 'Form Type', 'Date Filed', 'Filename'])
-        
-        df['CIK'] = df['CIK'].astype(str).str.zfill(10)
-        df['Link'] = df['Filename'].apply(lambda x: f"https://www.sec.gov/Archives/{x}")
+    const fetchSecFilings = useCallback(async () => {
+        if (!ticker) {
+            setMessage({ type: 'error', text: 'Please enter a ticker symbol to search.' });
+            return;
+        }
 
-        return df
-        
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching Master Index for {year} Q{qtr}: {e}")
-        return pd.DataFrame()
+        setIsLoading(true);
+        setFilingData(null);
 
-def load_master_index_callback(selected_key, index_options):
-    """Callback to load and store the master index file."""
-    if st.session_state.loaded_index_key == selected_key:
-        st.info("Index already loaded.")
-        return
+        const systemPrompt = "Act as an expert financial analyst. Find the most recent 10-K and 10-Q SEC filings for the specified company. Summarize the key risks and opportunities from the 'Management's Discussion and Analysis' section of each filing into concise, detailed bullet points. Include at least two key points for both risks and opportunities from each filing type (10-K and 10-Q). Only return the summarized analysis text, followed by a list of citation URIs.";
+        const userQuery = `Find the latest 10-K and 10-Q filings for the company with ticker ${ticker}.`;
+        const apiKey = "";
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
 
-    year, qtr = index_options[selected_key]
-    
-    with st.spinner(f"Loading Master Index for {selected_key}..."):
-        df = fetch_master_index_filings(year, qtr, HEADERS)
-        
-        if not df.empty:
-            st.session_state.master_filings_df = df
-            st.session_state.loaded_index_key = selected_key
-            st.success(f"Successfully loaded {len(df):,} filings for {selected_key}.")
-        else:
-            st.session_state.master_filings_df = pd.DataFrame()
-            st.session_state.loaded_index_key = ""
-            st.error("Failed to load filings.")
+        const payload = {
+            contents: [{ parts: [{ text: userQuery }] }],
+            tools: [{ "google_search": {} }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+        };
 
-def clear_master_index_callback():
-    """Callback to clear the loaded master index data."""
-    st.session_state.master_filings_df = pd.DataFrame()
-    st.session_state.loaded_index_key = ""
-    st.toast("Master index data cleared.")
-
-# --- Watchlist Summary Display Function ---
-
-def display_watchlist_summary(watchlist_companies, headers):
-    """
-    Fetches and merges the recent filings for all companies in the selected watchlist.
-    """
-    if not watchlist_companies:
-        st.warning("This watchlist is empty. Add companies using the sidebar controls.")
-        return
-
-    st.header(f"Combined Recent Filings for Watchlist: {st.session_state.selected_watchlist}")
-    
-    all_filings = []
-    
-    @st.cache_data(ttl=600)
-    def fetch_combined_watchlist_filings(_companies, _headers):
-        combined_filings = []
-        for cik, name in _companies.items():
-            st.caption(f"Fetching filings for {name} ({cik})...")
-            # We use the robust EDGAR scraping method here
-            filings = fetch_edgar_filings_list(cik, _headers)
-            for filing in filings:
-                filing['Company Name'] = name
-                combined_filings.append(filing)
-        return combined_filings
-
-    with st.spinner("Fetching and combining recent filings from EDGAR for all companies..."):
-        all_filings = fetch_combined_watchlist_filings(watchlist_companies, headers)
-        
-    if not all_filings:
-        st.error("Could not retrieve any filings for the companies in this watchlist.")
-        return
-
-    df_raw = pd.DataFrame(all_filings)
-    
-    df_raw['Filing Date'] = pd.to_datetime(df_raw['Filing Date'], errors='coerce')
-    df_raw.dropna(subset=['Filing Date'], inplace=True)
-         
-    st.markdown("---")
-    
-    filter_cols = st.columns([1, 2])
-    
-    all_company_names = sorted(df_raw['Company Name'].unique())
-    selected_companies = filter_cols[0].multiselect(
-        "Filter by Company:",
-        options=all_company_names,
-        default=all_company_names,
-        key='watchlist_company_filter'
-    )
-    
-    all_forms = sorted(df_raw['Filing Type'].unique())
-    default_forms = [f for f in ['10-K', '10-Q', '8-K', '4', 'S-1', 'D'] if f in all_forms]
-    selected_forms = filter_cols[1].multiselect(
-        "Filter Filings by Type:",
-        options=all_forms,
-        default=default_forms,
-        key='watchlist_form_filter'
-    )
-    
-    df_filtered = df_raw[
-        df_raw['Company Name'].isin(selected_companies) & 
-        df_raw['Filing Type'].isin(selected_forms)
-    ]
-
-    df_display = df_filtered.sort_values(by='Filing Date', ascending=False).head(500)
-    
-    st.subheader(f"Filtered Filings ({len(df_display):,} Found)")
-    
-    df_display['Action'] = df_display['CIK'].apply(lambda x: f"CIK: {x}")
-    
-    st.dataframe(
-        df_display[['Company Name', 'Filing Type', 'Filing Date', 'Link', 'Action']],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Link": st.column_config.LinkColumn("View Filing", display_text="Open Document"),
-            "Action": st.column_config.ButtonColumn(
-                "Use CIK", 
-                help="Click to set this CIK in the 'Company Filings & Metrics' tab.", 
-                on_click=update_target_cik, 
-                args=['CIK']
-            )
-        },
-        column_order=['Company Name', 'Filing Type', 'Filing Date', 'Link', 'Action']
-    )
-
-
-# --- Streamlit Main App Layout ---
-
-def main():
-    
-    # CRITICAL: Initialize ALL state variables before Streamlit configuration
-    initialize_session_state()
-
-    st.set_page_config(
-        page_title="SEC EDGAR Data Viewer",
-        layout="wide", 
-        initial_sidebar_state="expanded"
-    )
-    
-    st.title("SEC EDGAR Data Viewer")
-    
-    # --- Initialize Firebase and Load Watchlists ---
-    firebase_ready = initialize_firebase()
-    if firebase_ready:
-        load_watchlists() 
-
-    # --- Sidebar Setup ---
-    
-    # --- 1. SEC Compliance ---
-    st.sidebar.header("SEC Compliance (Required)")
-    app_name = st.sidebar.text_input("Application Name:", key='app_name')
-    email = st.sidebar.text_input("Contact Email:", key='email')
-    
-    HEADERS['User-Agent'] = f'{app_name} / {email}'
-    
-    # --- 2. Watchlist Management ---
-    st.sidebar.markdown("---")
-    st.sidebar.header("Personal Watchlists")
-
-    if not firebase_ready:
-        st.sidebar.error("Database unavailable. Watchlists cannot be managed.")
-    else:
-        
-        watchlist_names = list(st.session_state.watchlists.keys())
-        options_list = watchlist_names if watchlist_names else ["<No Watchlists>"]
-        
-        default_index = 0
-        if st.session_state.selected_watchlist in watchlist_names:
-            default_index = watchlist_names.index(st.session_state.selected_watchlist)
-        
-        selected_list_name = st.sidebar.selectbox(
-            "Select Watchlist:",
-            options=options_list,
-            index=default_index,
-            key='watchlist_select_box'
-        )
-        st.session_state.selected_watchlist = selected_list_name 
-        
-        if selected_list_name and selected_list_name != "<No Watchlists>":
-            current_list = st.session_state.watchlists.get(selected_list_name, {})
-            st.sidebar.caption(f"**{len(current_list)}** companies in list.")
-            
-            with st.sidebar.expander("Current Companies"):
-                if current_list:
-                    companies_df = pd.DataFrame(
-                        [(cik, name) for cik, name in current_list.items()], 
-                        columns=['CIK', 'Name']
-                    ).sort_values(by='Name')
-                    
-                    for index, row in companies_df.iterrows():
-                        col_name, col_delete = st.columns([3, 1])
-                        col_name.text(f"{row['Name']} ({row['CIK'][-4:]})")
-                        col_delete.button(
-                            "🗑️", 
-                            key=f"delete_{row['CIK']}", 
-                            help="Remove from watchlist",
-                            on_click=delete_company_from_watchlist_callback,
-                            args=(row['CIK'],)
-                        )
-                else:
-                    st.write("List is currently empty.")
-
-
-        st.sidebar.markdown("##### Add New Company to Selected List")
-        st.sidebar.text_input("Company Name (optional):", key='company_name_input')
-        st.sidebar.text_input("CIK (e.g., 320193):", key='company_cik_input', max_chars=10)
-        
-        st.sidebar.button(
-            f"Add to '{selected_list_name}'" if selected_list_name and selected_list_name != "<No Watchlists>" else "Add Company",
-            on_click=add_company_to_watchlist_callback,
-            key='add_company_button',
-            disabled=(selected_list_name is None or selected_list_name == "<No Watchlists>")
-        )
-        
-        st.sidebar.markdown("##### Create New Watchlist")
-        st.sidebar.text_input("New Watchlist Name:", key='new_watchlist_name')
-        st.sidebar.button(
-            "Create List",
-            on_click=create_watchlist_callback,
-            key='create_watchlist_button'
-        )
-
-    st.sidebar.markdown("---")
-
-    # --- TAB STRUCTURE ---
-    tab_watchlist, tab_data, tab_daily_index, tab_lookup = st.tabs([
-        "Watchlist Summary",
-        "Company Filings & Metrics", 
-        "Daily Filings Index",
-        "CIK Lookup (Experimental)"
-    ])
-    
-    # --- 1. Watchlist Summary Tab ---
-    with tab_watchlist:
-        if not firebase_ready:
-            st.error("Watchlist features require a functioning database connection.")
-        elif st.session_state.selected_watchlist and st.session_state.selected_watchlist != "<No Watchlists>":
-            companies = st.session_state.watchlists.get(st.session_state.selected_watchlist, {})
-            display_watchlist_summary(companies, HEADERS)
-        else:
-            st.info("Select or create a watchlist in the sidebar to view a summary of all included companies' filings.")
-
-
-    # --- 2. Company Filings & Metrics Tab (Main Working Feature) ---
-    with tab_data:
-        st.header("Fetch Data by CIK")
-        st.markdown("Use this section to fetch detailed financial metrics and recent filings for a **single company** identified by its Central Index Key (CIK).")
-        
-        target_cik = st.text_input(
-            "Central Index Key (CIK):", 
-            value=st.session_state.target_cik, 
-            max_chars=10,
-            placeholder="e.g., 320193",
-            key='cik_input_final'
-        ).strip()
-        
-        if st.button("Fetch Financials & Filings", key='fetch_data_button'):
-            
-            if not target_cik.isdigit():
-                st.error("Please enter a valid numeric CIK to fetch data.")
-                return
-
-            if app_name.strip() == "Financial-Data-App" or email.strip() == "user@example.com":
-                 st.warning("Please update the Application Name and Contact Email in the sidebar for SEC compliance.")
-
-            # 1. Fetch Company Facts (for Metrics)
-            with st.spinner(f"Fetching company facts for CIK {target_cik}..."):
-                facts_json = fetch_sec_company_facts(target_cik, HEADERS)
-
-            if facts_json:
-                company_name = facts_json.get('entityData', {}).get('name', f"CIK {target_cik}")
-                display_key_metrics(facts_json)
+        try {
+            const apiCall = async () => {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
                 
-                # 2. Fetch and Display Filings
-                display_company_filings(facts_json, target_cik, company_name, HEADERS)
-            else:
-                st.error(f"Failed to retrieve financial facts for CIK {target_cik}. Please verify the CIK is correct.")
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
 
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+                const text = candidate?.content?.parts?.[0]?.text || "No detailed summary could be generated.";
 
-    # --- 3. Daily Filings Index Tab (Non-Company Specific Feature) ---
-    with tab_daily_index:
-        st.header("Browse Recent SEC Filings Index")
-        
-        current_date = date.today()
-        current_year = current_date.year
-        current_qtr = (current_date.month - 1) // 3 + 1
-        
-        index_options = {}
-        for i in range(4): # Show last 4 quarters
-            qtr_end_date = current_date - relativedelta(months=3 * i)
-            year = qtr_end_date.year
-            qtr = (qtr_end_date.month - 1) // 3 + 1
-            start_month = ['Jan', 'Apr', 'Jul', 'Oct'][qtr - 1]
-            end_month = ['Mar', 'Jun', 'Sep', 'Dec'][qtr - 1]
-            key = f"{year} Q{qtr} ({start_month} - {end_month})"
-            index_options[key] = (year, qtr)
+                let sources = [];
+                const groundingMetadata = candidate?.groundingMetadata;
+                if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                    sources = groundingMetadata.groundingAttributions
+                        .map(attribution => ({
+                            uri: attribution.web?.uri,
+                            title: attribution.web?.title || 'External Source',
+                        }))
+                        .filter(source => source.uri);
+                }
 
-        selected_key = st.selectbox(
-            "Choose Master Index Quarter:", 
-            options=list(index_options.keys()), 
-            index=0, 
-            key='index_quarter_select'
-        )
-        
-        col1, col2 = st.columns([1, 1])
-        col1.button("Load Filings", on_click=load_master_index_callback, args=(selected_key, index_options))
-        # FIXED: Corrected 'on_on_click' to 'on_click'
-        col2.button("Clear Loaded Data", on_click=clear_master_index_callback)
-        
-        df = st.session_state.master_filings_df
-        if not df.empty:
-            st.subheader(f"Filings for {st.session_state.loaded_index_key} ({len(df):,} Total)")
+                setFilingData({ text, sources });
+                setMessage({ type: 'success', text: `Filings summary generated for ${ticker}.` });
+            };
             
-            unique_forms = sorted(df['Form Type'].unique())
-            form_filter = st.multiselect(
-                "Filter by Form Type:", 
-                options=unique_forms, 
-                default=[f for f in ['10-K', '10-Q', '8-K'] if f in unique_forms],
-                key='master_index_form_filter'
-            )
-            
-            df_filtered = df[df['Form Type'].isin(form_filter)]
-            
-            st.caption(f"Showing {len(df_filtered):,} filtered filings.")
+            await withExponentialBackoff(apiCall);
 
-            df_display = df_filtered.head(50).copy()
-            df_display['Action'] = df_display['CIK'].apply(lambda x: f"CIK: {x}")
+        } catch (error) {
+            console.error("SEC Filings API Error:", error);
+            setFilingData({ text: `Failed to fetch or summarize filings for ${ticker}. Error: ${error.message}`, sources: [] });
+            setMessage({ type: 'error', text: `Failed to fetch SEC filings for ${ticker}.` });
+        } finally {
+            setIsLoading(false);
+            setIsInitialLoad(false);
+        }
+    }, [ticker, setMessage]);
+    
+    // Fetch initial data on mount (or when ticker changes)
+    useEffect(() => {
+        if (ticker && isInitialLoad) {
+            fetchSecFilings();
+        }
+    }, [ticker, isInitialLoad, fetchSecFilings]);
+
+    const FilingsDisplay = () => {
+        if (isLoading) {
+            return <div className="text-center py-12 text-yellow-300 font-medium text-lg">Analyzing filings... please wait.</div>;
+        }
+
+        if (isInitialLoad) {
+            return <div className="text-center py-12 text-gray-400">Enter a ticker and click "Analyze" to begin.</div>;
+        }
+
+        if (filingData) {
+            return (
+                <div className="mt-6 bg-gray-700 p-5 rounded-lg">
+                    <h3 className="text-xl font-bold mb-3 text-yellow-200 border-b border-gray-600 pb-2">Analysis Summary</h3>
+                    {/* The response text is markdown, so we use dangerouslySetInnerHTML for rendering the bullet points and formatting */}
+                    <div className="prose prose-sm prose-invert max-w-none text-gray-300 mb-6" dangerouslySetInnerHTML={{ __html: filingData.text }} />
+
+                    <h3 className="text-lg font-semibold mt-4 mb-2 text-gray-300">Cited Sources ({filingData.sources.length})</h3>
+                    <ul className="space-y-1 text-sm">
+                        {filingData.sources.map((source, index) => (
+                            <li key={index} className="flex items-start">
+                                <span className="text-yellow-400 mr-2 flex-shrink-0">•</span>
+                                <a 
+                                    href={source.uri} 
+                                    target="_blank" 
+                                    rel="noopener noreferrer" 
+                                    className="text-blue-400 hover:text-blue-300 truncate"
+                                    title={source.uri}
+                                >
+                                    {source.title}
+                                </a>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            );
+        }
+
+        return null;
+    };
+
+
+    return (
+        <div className="p-4 sm:p-6 md:p-8 bg-gray-900 min-h-full">
+            <h1 className="text-3xl font-extrabold mb-6 text-yellow-400 border-b border-gray-700 pb-3">
+                <FileText className="inline-block mr-3" size={28} />
+                SEC Filings Analyzer
+            </h1>
+            <div className="bg-gray-800 p-6 rounded-xl shadow-2xl">
+                <div className="flex flex-col sm:flex-row gap-3 mb-6">
+                    <input
+                        type="text"
+                        placeholder="Enter Ticker Symbol (e.g., AAPL)"
+                        value={ticker}
+                        onChange={(e) => setTicker(e.target.toUpperCase())}
+                        className="flex-1 p-3 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-yellow-500 focus:border-yellow-500"
+                        onKeyPress={(e) => { if (e.key === 'Enter') fetchSecFilings(); }}
+                    />
+                    <button 
+                        onClick={fetchSecFilings}
+                        disabled={isLoading}
+                        className="bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-3 px-6 rounded-lg transition duration-150 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                    >
+                        {isLoading ? 'Analyzing...' : 'Analyze Filings'}
+                    </button>
+                </div>
+                
+                <FilingsDisplay />
+            </div>
+        </div>
+    );
+};
+
+
+// --- 2. Watchlist Component (Content for the Stock Watchlist Tab) ---
+
+const StockWatchlistTab = ({ db, userId, isAuthReady, setMessage }) => {
+    
+    // UI & Data State
+    const [searchTerm, setSearchTerm] = useState('');
+    const [results, setResults] = useState([]);
+    const [watchlist, setWatchlist] = useState([]);
+    const [isLoading, setIsLoading] = useState(false);
+
+    const debouncedSearchTerm = useDebounce(searchTerm, 500);
+
+    // Helper to construct the Watchlist Collection Path
+    const getWatchlistCollectionRef = useCallback((dbInstance, uid) => {
+        if (!dbInstance || !uid) return null;
+        // Public path: /artifacts/{appId}/public/data/stockWatchlists
+        return collection(dbInstance, 'artifacts', appId, 'public', 'data', 'stockWatchlists');
+    }, []);
+
+    // --- STOCK SEARCH API CALL ---
+    const searchStocks = useCallback(async () => {
+        if (!debouncedSearchTerm) {
+            setResults([]);
+            return;
+        }
+
+        const systemPrompt = "You are a financial data provider. Respond to the user's search query for a stock ticker or company name with a JSON array of stock objects. Each object must contain 'ticker', 'companyName', 'currentPrice' (a mock USD value), and 'dailyChange' (a mock percentage string like '+1.50%'). Use real and popular stock data, but mock the price fields.";
+        const userQuery = `Find stocks matching the ticker or name: "${debouncedSearchTerm}". Provide only the JSON array.`;
+        const apiKey = "";
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+        setIsLoading(true);
+        setResults([]);
+
+        const payload = {
+            contents: [{ parts: [{ text: userQuery }] }],
+            tools: [{ "google_search": {} }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: "ARRAY",
+                    items: {
+                        type: "OBJECT",
+                        properties: {
+                            "ticker": { "type": "STRING", "description": "The stock market ticker symbol (e.g., AAPL)." },
+                            "companyName": { "type": "STRING", "description": "The full name of the company." },
+                            "currentPrice": { "type": "STRING", "description": "A mock current price in USD (e.g., $185.20)." },
+                            "dailyChange": { "type": "STRING", "description": "A mock daily percentage change (e.g., +1.50% or -0.75%)." }
+                        },
+                        required: ["ticker", "companyName", "currentPrice", "dailyChange"]
+                    }
+                }
+            }
+        };
+
+        try {
+            const apiCall = async () => {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const responseText = await response.text();
+                if (!responseText.trim()) {
+                    throw new Error("Empty response body from API.");
+                }
+                
+                const result = JSON.parse(responseText);
+                const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                if (text) {
+                    const parsedJson = JSON.parse(text);
+                    if (Array.isArray(parsedJson)) {
+                        setResults(parsedJson.map(stock => ({
+                            ...stock,
+                            id: stock.ticker, 
+                        })));
+                    }
+                } else {
+                    throw new Error("Model response was empty or malformed.");
+                }
+            };
             
-            st.dataframe(
-                df_display[['Company Name', 'Form Type', 'Date Filed', 'Link', 'Action']],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Link": st.column_config.LinkColumn("View Filing", display_text="Open Document"),
-                    "Action": st.column_config.ButtonColumn(
-                        "Use CIK", 
-                        help="Click to set this CIK in the 'Company Filings & Metrics' tab.", 
-                        on_click=update_target_cik, 
-                        args=['CIK']
-                    )
-                },
-                column_order=['Company Name', 'Form Type', 'Date Filed', 'Link', 'Action']
-            )
+            await withExponentialBackoff(apiCall);
 
-    # --- 4. CIK Lookup (Experimental) Tab ---
-    with tab_lookup:
-        st.header("Search CIK by Ticker (Experimental)")
-        st.caption("This uses the SEC's search engine and can sometimes be unreliable or slow.")
-        
-        ticker_input = st.text_input("Enter Stock Ticker:", value="", key='ticker_input_p').strip().upper()
-        
-        st.button(
-            "Search CIK", 
-            on_click=search_cik_callback, 
-            args=(app_name, email)
-        )
-        
-        if 'cik_lookup_result' in st.session_state and st.session_state.cik_lookup_result:
-            st.markdown(f"**Result:** {st.session_state.cik_lookup_result}")
+        } catch (error) {
+            console.error("Stock search API error:", error);
+            setMessage({ 
+                type: 'error', 
+                text: error.message.includes('Unexpected end of input') 
+                    ? 'Search failed due to incomplete data (network issue).' 
+                    : `Search failed: ${error.message}` 
+            });
+        } finally {
+            setIsLoading(false);
+        }
+    }, [debouncedSearchTerm, setMessage]);
 
-if __name__ == '__main__':
-    main()
+    // Trigger search when debounced term changes
+    useEffect(() => {
+        searchStocks();
+    }, [debouncedSearchTerm, searchStocks]);
+
+    // --- FIREBASE WATCHLIST LISTENER (onSnapshot) ---
+    useEffect(() => {
+        if (!isAuthReady || !db || !userId) {
+            setWatchlist([]);
+            return;
+        }
+
+        const watchlistRef = getWatchlistCollectionRef(db, userId);
+        if (!watchlistRef) return;
+
+        // Query documents owned by the current user
+        const q = query(watchlistRef, where("userId", "==", userId));
+
+        const unsubscribe = onSnapshot(q, (querySnapshot) => {
+            const items = [];
+            querySnapshot.forEach((doc) => {
+                items.push({ id: doc.id, ...doc.data() });
+            });
+            // Sort by timestamp for consistent order
+            items.sort((a, b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0));
+            setWatchlist(items);
+        }, (error) => {
+            console.error("Firestore Watchlist Listener Error:", error);
+            setMessage({ type: 'error', text: 'Failed to load watchlist in real-time.' });
+        });
+
+        return () => unsubscribe();
+    }, [db, userId, isAuthReady, getWatchlistCollectionRef, setMessage]);
+
+    // --- FIREBASE MUTATIONS ---
+
+    const addToWatchlist = useCallback(async (stock) => {
+        if (!db || !userId) {
+            setMessage({ type: 'error', text: 'Database not connected. Please wait for authentication.' });
+            return;
+        }
+
+        if (watchlist.some(item => item.ticker === stock.ticker)) {
+            setMessage({ type: 'info', text: `${stock.ticker} is already on your watchlist.` });
+            return;
+        }
+
+        const watchlistRef = getWatchlistCollectionRef(db, userId);
+
+        try {
+            await addDoc(watchlistRef, {
+                userId: userId,
+                ticker: stock.ticker,
+                companyName: stock.companyName,
+                currentPrice: stock.currentPrice,
+                dailyChange: stock.dailyChange,
+                timestamp: serverTimestamp()
+            });
+            setMessage({ type: 'success', text: `${stock.ticker} added to watchlist!` });
+        } catch (error) {
+            console.error("Error adding document: ", error);
+            setMessage({ type: 'error', text: `Failed to add ${stock.ticker}.` });
+        }
+    }, [db, userId, watchlist, getWatchlistCollectionRef, setMessage]);
+
+    const removeFromWatchlist = useCallback(async (itemId, ticker) => {
+        if (!db || !userId) {
+            setMessage({ type: 'error', text: 'Database not connected. Please wait for authentication.' });
+            return;
+        }
+
+        const watchlistRef = getWatchlistCollectionRef(db, userId);
+
+        try {
+            await deleteDoc(doc(watchlistRef, itemId));
+            setMessage({ type: 'success', text: `${ticker} removed from watchlist.` });
+        } catch (error) {
+            console.error("Error removing document: ", error);
+            setMessage({ type: 'error', text: 'Failed to remove item.' });
+        }
+    }, [db, userId, getWatchlistCollectionRef, setMessage]);
+
+
+    // UI Rendering helpers
+    const getButtonStatus = (ticker) => {
+        return watchlist.some(item => item.ticker === ticker) ? 'Remove' : 'Add';
+    };
+
+    const handleAction = (stock) => {
+        const existingItem = watchlist.find(item => item.ticker === stock.ticker);
+        if (existingItem) {
+            removeFromWatchlist(existingItem.id, existingItem.ticker); 
+        } else {
+            addToWatchlist(stock);
+        }
+    };
+
+    const getChangeClass = (change) => {
+        if (!change) return 'text-gray-400';
+        return change.startsWith('+') ? 'text-green-400' : 'text-red-400';
+    };
+
+    const StockCard = ({ stock, isWatchlist }) => {
+        return (
+            <div className="flex justify-between items-center p-3 bg-gray-700/50 rounded-lg shadow-md border border-gray-600/50 space-x-3 w-full">
+                <div className='flex-1 min-w-0'>
+                    <p className="text-xl font-extrabold text-white truncate">{stock.ticker}</p>
+                    <p className="text-sm text-gray-400 truncate">{stock.companyName}</p>
+                </div>
+
+                <div className='flex flex-col items-end min-w-[120px]'>
+                    <p className="font-bold text-lg text-indigo-300">{stock.currentPrice}</p>
+                    <p className={`text-sm font-medium ${getChangeClass(stock.dailyChange)}`}>
+                        {stock.dailyChange}
+                    </p>
+                </div>
+
+                {isWatchlist ? (
+                    <button
+                        onClick={() => removeFromWatchlist(stock.id, stock.ticker)}
+                        className="bg-red-600 hover:bg-red-700 text-white text-sm font-medium py-1 px-3 rounded-full transition duration-150 flex-shrink-0"
+                    >
+                        <X size={16} className='inline-block mr-1'/> Remove
+                    </button>
+                ) : (
+                    <button
+                        onClick={() => handleAction(stock)}
+                        className={`text-sm font-medium py-1 px-3 rounded-full transition duration-150 flex-shrink-0 ${
+                            getButtonStatus(stock.ticker) === 'Remove'
+                            ? 'bg-red-600 hover:bg-red-700 text-white'
+                            : 'bg-green-600 hover:bg-green-700 text-white'
+                        }`}
+                    >
+                        {getButtonStatus(stock.ticker) === 'Remove' ? 'Remove' : 'Add'}
+                    </button>
+                )}
+            </div>
+        );
+    };
+
+    return (
+        <div className="p-4 sm:p-6 md:p-8 bg-gray-900 min-h-full">
+            <h1 className="text-3xl font-extrabold mb-6 text-green-400 border-b border-gray-700 pb-3">
+                <TrendingUp className="inline-block mr-3" size={28} />
+                Stock Watchlist
+            </h1>
+
+            <div className="grid md:grid-cols-2 gap-8">
+                {/* Search Panel */}
+                <div className="bg-gray-800 p-6 rounded-xl shadow-2xl">
+                    <h2 className="text-xl font-bold mb-4 text-green-300 flex items-center"><Search size={20} className='mr-2'/> Search Stocks</h2>
+                    <input
+                        type="text"
+                        placeholder="e.g., AAPL, GOOG, Tesla"
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className="w-full p-3 mb-4 rounded-lg bg-gray-700 border border-gray-600 text-white focus:ring-green-500 focus:border-green-500"
+                    />
+                    
+                    <div className="space-y-3 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                        {isLoading && <p className="text-center py-4 text-green-400">Searching...</p>}
+                        {!isLoading && results.length === 0 && searchTerm.length > 0 && (
+                            <p className="text-center py-4 text-gray-400">No results found. Try a different ticker or company.</p>
+                        )}
+                        {results.map((stock) => (
+                            <StockCard key={stock.id} stock={stock} isWatchlist={false} />
+                        ))}
+                    </div>
+                </div>
+
+                {/* Watchlist Panel */}
+                <div className="bg-gray-800 p-6 rounded-xl shadow-2xl">
+                    <h2 className="text-xl font-bold mb-4 text-indigo-300">My Watchlist ({watchlist.length})</h2>
+                    
+                    <div className="space-y-3 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                        {!isAuthReady && (
+                            <p className="text-center py-4 text-yellow-400 font-medium">
+                                Establishing secure database connection...
+                            </p>
+                        )}
+                        {isAuthReady && watchlist.length === 0 && (
+                            <p className="text-center py-4 text-gray-400">Your watchlist is empty! Add some stocks.</p>
+                        )}
+                        {isAuthReady && watchlist.map((item) => (
+                            <StockCard 
+                                key={item.id} 
+                                stock={item}
+                                isWatchlist={true} 
+                            />
+                        ))}
+                    </div>
+                </div>
+            </div>
+            
+            <style>{`
+                /* Custom Scrollbar Styles for the Lists */
+                .custom-scrollbar::-webkit-scrollbar {
+                    width: 8px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-track {
+                    background: #374151;
+                    border-radius: 10px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb {
+                    background: #34d399; /* green-400 for Watchlist */
+                    border-radius: 10px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+                    background: #10b981; 
+                }
+            `}</style>
+        </div>
+    );
+};
+
+
+// --- 3. Main Application Wrapper (Handles Tabs/Routing) ---
+
+const App = () => {
+    // Start on the SEC Filings tab since that was the previous focus
+    const [activeTab, setActiveTab] = useState('filings'); 
+    const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+    
+    // Global State for Firebase and Messaging
+    const [db, setDb] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [message, setMessage] = useState(null);
+
+    // --- FIREBASE INITIALIZATION AND AUTHENTICATION ---
+    useEffect(() => {
+        if (!firebaseConfig) {
+            setMessage({ type: 'error', text: 'Firebase configuration is missing.' });
+            return;
+        }
+
+        try {
+            const app = initializeApp(firebaseConfig);
+            const firestore = getFirestore(app);
+            const firebaseAuth = getAuth(app);
+
+            setDb(firestore);
+            
+            const signInUser = async () => {
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(firebaseAuth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(firebaseAuth);
+                    }
+                } catch (error) {
+                    console.error("Firebase Auth Error:", error);
+                    setMessage({ type: 'error', text: `Authentication failed: ${error.message}` });
+                }
+            };
+
+            const unsubscribeAuth = onAuthStateChanged(firebaseAuth, (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                } else {
+                    signInUser();
+                }
+                setIsAuthReady(true);
+            });
+
+            return () => unsubscribeAuth();
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            setMessage({ type: 'error', text: `Firebase init failed: ${error.message}` });
+        }
+    }, []);
+
+
+    const renderContent = () => {
+        // Pass necessary props down to the child components
+        const componentProps = { db, userId, isAuthReady, setMessage };
+
+        switch (activeTab) {
+            case 'watchlist':
+                return <StockWatchlistTab {...componentProps} />;
+            case 'filings':
+                return <SecFilingsTab {...componentProps} />;
+            case 'main':
+            default:
+                return (
+                    <div className="p-8 bg-gray-900 min-h-full flex flex-col items-center justify-center">
+                        <h1 className="text-4xl font-bold text-indigo-400 mb-4">Financial Dashboard</h1>
+                        <p className="text-gray-400 text-lg text-center max-w-md">
+                            Use the sidebar to navigate between the Stock Watchlist and the SEC Filings Analyzer.
+                        </p>
+                        <p className="mt-6 text-sm text-gray-500 break-all">
+                            <span className="font-bold text-gray-400 mr-1">User ID:</span> {userId || 'N/A'}
+                        </p>
+                    </div>
+                );
+        }
+    };
+    
+    // Style for responsive sidebar toggle
+    const sidebarClasses = isSidebarOpen 
+        ? "translate-x-0 w-64" 
+        : "-translate-x-full w-0 md:translate-x-0 md:w-64";
+
+    return (
+        <div className="flex h-screen bg-gray-900 text-white">
+            
+            {/* Sidebar (Navigation) */}
+            <div className={`fixed inset-y-0 left-0 transform transition-all duration-300 ease-in-out z-30 
+                             ${sidebarClasses} bg-gray-800 border-r border-gray-700 shadow-xl md:relative md:flex-shrink-0`}>
+                
+                <div className="p-4 flex flex-col h-full">
+                    <div className="flex justify-between items-center mb-6">
+                        <h2 className="text-xl font-bold text-indigo-400">Financial Tools</h2>
+                        <button 
+                            className="text-gray-400 md:hidden p-1 rounded-full hover:bg-gray-700"
+                            onClick={() => setIsSidebarOpen(false)}
+                        >
+                            <X size={24} />
+                        </button>
+                    </div>
+
+                    {/* Nav Items */}
+                    <nav className="space-y-2 flex-grow">
+                        {/* Dashboard Tab */}
+                        <button
+                            onClick={() => { setActiveTab('main'); setIsSidebarOpen(false); }}
+                            className={`flex items-center w-full px-4 py-2 rounded-lg transition duration-150 ${
+                                activeTab === 'main' 
+                                    ? 'bg-indigo-600 text-white shadow-lg' 
+                                    : 'text-gray-300 hover:bg-gray-700'
+                            }`}
+                        >
+                            <LayoutDashboard size={20} className="mr-3" />
+                            Dashboard
+                        </button>
+
+                        {/* Watchlist Tab */}
+                        <button
+                            onClick={() => { setActiveTab('watchlist'); setIsSidebarOpen(false); }}
+                            className={`flex items-center w-full px-4 py-2 rounded-lg transition duration-150 ${
+                                activeTab === 'watchlist' 
+                                    ? 'bg-green-600 text-white shadow-lg' 
+                                    : 'text-gray-300 hover:bg-gray-700'
+                            }`}
+                        >
+                            <TrendingUp size={20} className="mr-3" />
+                            Stock Watchlist
+                        </button>
+
+                         {/* SEC Filings Tab */}
+                         <button
+                            onClick={() => { setActiveTab('filings'); setIsSidebarOpen(false); }}
+                            className={`flex items-center w-full px-4 py-2 rounded-lg transition duration-150 ${
+                                activeTab === 'filings' 
+                                    ? 'bg-yellow-600 text-white shadow-lg' 
+                                    : 'text-gray-300 hover:bg-gray-700'
+                            }`}
+                        >
+                            <FileText size={20} className="mr-3" />
+                            SEC Filings
+                        </button>
+
+                    </nav>
+
+                    {/* Footer/Status */}
+                    <div className="mt-4 pt-4 border-t border-gray-700">
+                         <p className="text-sm font-mono break-all text-gray-500">
+                             <span className="font-bold text-gray-400 mr-1">User ID:</span> {userId ? `${userId.substring(0, 8)}...` : 'N/A'}
+                         </p>
+                    </div>
+                </div>
+            </div>
+
+            {/* Main Content Area */}
+            <div className="flex-1 flex flex-col overflow-y-auto">
+                {/* Mobile Header for Toggle */}
+                <header className="bg-gray-800 p-4 md:hidden flex justify-between items-center border-b border-gray-700 z-20">
+                    <button 
+                        className="p-1 rounded-full hover:bg-gray-700"
+                        onClick={() => setIsSidebarOpen(true)}
+                    >
+                        <Menu size={24} className="text-white" />
+                    </button>
+                    <h1 className="text-xl font-bold text-indigo-400">
+                        {activeTab === 'main' ? 'Dashboard' : activeTab === 'watchlist' ? 'Watchlist' : 'Filings'}
+                    </h1>
+                </header>
+
+                {/* Content */}
+                <main className="flex-1 overflow-y-auto">
+                    {/* Message Box (Global) */}
+                    {message && (
+                        <div className={`p-3 mx-auto mt-4 max-w-4xl rounded-lg shadow-md ${
+                            message.type === 'error' ? 'bg-red-800 border-red-600' :
+                            message.type === 'success' ? 'bg-green-800 border-green-600' :
+                            'bg-blue-800 border-blue-600'
+                        } border z-10`} onClick={() => setMessage(null)}>
+                            <p className="font-medium text-center">{message.text}</p>
+                        </div>
+                    )}
+                    {renderContent()}
+                </main>
+            </div>
+        </div>
+    );
+};
+
+export default App;
