@@ -27,6 +27,15 @@ if 'master_filings_df' not in st.session_state:
 if 'loaded_index_key' not in st.session_state: 
     st.session_state.loaded_index_key = ""
 
+# --- CALLBACK FUNCTIONS ---
+
+def update_target_cik(cik):
+    """Callback to set the CIK input and main CIK state for the other tab."""
+    st.session_state.cik_input_final = str(cik).zfill(10)
+    st.session_state.target_cik = str(cik).zfill(10)
+    st.toast(f"CIK {cik} copied to the 'Company Filings' tab!")
+
+
 # --- CIK Lookup Function (Using Search API for Stability) ---
 # NOTE: This function remains as-is but is now isolated in the "CIK Lookup" tab due to instability.
 
@@ -197,9 +206,14 @@ def fetch_master_index_filings(year, qtr, headers):
         content_lines = content.splitlines()
         data_lines = content_lines[11:] 
         
+        # Use StringIO to treat the raw text as a file buffer for pandas to read
         data = StringIO("\n".join(data_lines))
+        # Use a consistent separator ('|') and define column names
         df = pd.read_csv(data, sep='|', header=None, 
                          names=['CIK', 'Company Name', 'Form Type', 'Date Filed', 'Filename'])
+        
+        # Convert CIK to string and pad it to 10 digits for consistency
+        df['CIK'] = df['CIK'].astype(str).str.zfill(10)
         
         def create_index_sec_link(row):
              return f"https://www.sec.gov/Archives/{row['Filename']}"
@@ -228,24 +242,43 @@ def display_key_metrics(data, identifier):
     metrics_to_find = {
         "Revenues": "Latest Reported Revenue",
         "Assets": "Latest Reported Total Assets",
-        "NetIncomeLoss": "Latest Reported Net Income / Loss"
+        "NetIncomeLoss": "Latest Reported Net Income / Loss",
+        # Adding a popular non-GAAP-like proxy (if available, e.g. for certain types of companies)
+        # Note: True non-GAAP metrics are harder to extract directly from facts API without specific knowledge
+        "EarningsPerShareBasic": "Latest EPS (Basic)"
     }
 
     cols = st.columns(len(metrics_to_find))
     
     for i, (gaap_tag, display_name) in enumerate(metrics_to_find.items()):
         
-        metric_data = us_gaap.get(gaap_tag, {}).get('units', {}).get('USD', [])
+        # The units can vary (e.g., USD, shares), so we prioritize USD for monetary values
+        units_data = us_gaap.get(gaap_tag, {}).get('units', {})
         
+        # Try USD first, then try 'shares' for EPS, otherwise take the first available unit.
+        metric_data = units_data.get('USD', [])
+        if not metric_data and gaap_tag == "EarningsPerShareBasic":
+            metric_data = units_data.get('shares', [])
+        if not metric_data and units_data:
+            metric_data = next(iter(units_data.values()))
+
+
         with cols[i]:
             if metric_data:
+                # Sort by end date (latest first)
                 metric_data.sort(key=lambda x: x.get('end', '0'), reverse=True)
                 latest_metric = metric_data[0]
                 
                 value = latest_metric['val']
                 end_date = latest_metric['end']
                 
-                st.metric(label=display_name, value=f"${value:,.0f}")
+                # Format value based on type (simple heuristic)
+                if gaap_tag == "EarningsPerShareBasic":
+                    value_str = f"${value:,.2f}" # EPS usually has decimals
+                else:
+                    value_str = f"${value:,.0f}" # Revenue/Assets/NetIncome in whole dollars
+
+                st.metric(label=display_name, value=value_str)
                 st.caption(f"Period End: {end_date}")
             else:
                 st.metric(label=display_name, value="N/A")
@@ -266,7 +299,7 @@ def display_company_filings(data, cik, company_name, headers):
     filings_for_df = []
     
     if filings_list_from_facts:
-        st.caption("Using filing data from the structured 'facts' API.")
+        st.caption("Using filing data from the structured 'facts' API (may be incomplete).")
         for filing in filings_list_from_facts:
             # Construct a direct link to the full text document
             acc_no = filing.get('accessionNumber', 'N/A').replace('-', '')
@@ -293,7 +326,7 @@ def display_company_filings(data, cik, company_name, headers):
     all_filing_types = set(df['Filing Type'].unique())
     
     # 1. Add Filing Type Filter
-    default_selection = [t for t in ['10-K', '10-Q', '8-K', '4'] if t in all_filing_types]
+    default_selection = [t for t in ['10-K', '10-Q', '8-K', '4', 'S-1'] if t in all_filing_types]
     if not default_selection and all_filing_types:
         # Default to the first few if common ones aren't found
         default_selection = sorted(list(all_filing_types))[:3]
@@ -337,7 +370,8 @@ def search_cik_callback(app_name, email):
         st.session_state.target_cik = ""
         return
 
-    if app_name.strip() == "MySECApp" or email.strip() == "user@example.com":
+    # Check for placeholder compliance values
+    if app_name.strip() == "DefaultAppName" or email.strip() == "default@example.com":
          st.warning("Please update the Application Name and Contact Email in the sidebar for SEC compliance.")
 
     with st.spinner(f"Attempting ticker lookup for {ticker}..."):
@@ -362,6 +396,9 @@ def load_master_index_callback(selected_key, index_options):
     
     # Only reload if the key has changed
     if st.session_state.loaded_index_key != selected_key:
+        
+        # Clear existing data before loading new data to prevent mixed states
+        st.session_state.master_filings_df = pd.DataFrame() 
         
         master_df = fetch_master_index_filings(year, qtr, HEADERS)
         
@@ -395,10 +432,11 @@ def main():
         "The SEC requires all API requests to include an identifying User-Agent. Please fill this out to ensure data fetching works."
     )
     
+    # Set default values for User-Agent
     if 'app_name' not in st.session_state:
-        st.session_state.app_name = "MySECApp"
+        st.session_state.app_name = "DefaultAppName"
     if 'email' not in st.session_state:
-        st.session_state.email = "user@example.com"
+        st.session_state.email = "default@example.com"
         
     app_name = st.sidebar.text_input("Application Name:", key='app_name')
     email = st.sidebar.text_input("Contact Email:", key='email')
@@ -441,6 +479,10 @@ def main():
             if not target_cik.isdigit():
                 st.error("Please enter a valid numeric CIK to fetch data.")
                 return
+
+            # Check for placeholder compliance values before fetching
+            if app_name.strip() == "DefaultAppName" or email.strip() == "default@example.com":
+                 st.warning("Please update the Application Name and Contact Email in the sidebar for SEC compliance.")
 
             # --- Data Fetching ---
             with st.spinner(f"Fetching complete data set for CIK: {target_cik}..."):
@@ -497,13 +539,16 @@ def main():
         
         col_load, col_clear = st.columns([1, 1])
         
-        if col_load.button(f"Load Filings for {selected_key}"):
-             # Use the callback to load the data
-             load_master_index_callback(selected_key, index_options)
+        # Use callback for cleaner state management on button click
+        col_load.button(
+            f"Load Filings for {selected_key}",
+            on_click=load_master_index_callback,
+            args=(selected_key, index_options),
+            key='load_index_button'
+        )
         
-        if col_clear.button("Clear Loaded Data"):
-            clear_master_index_callback()
-            st.rerun() # Rerun to clear the display immediately
+        col_clear.button("Clear Loaded Data", on_click=clear_master_index_callback)
+
 
         # --- Display and Filter Loaded Data ---
         df = st.session_state.master_filings_df
@@ -568,17 +613,21 @@ def main():
             
             # Filter by Company Name Search
             search_query = filter_cols[1].text_input(
-                "Search Company Name:",
-                placeholder="e.g., Apple, Microsoft, Tesla",
+                "Search Company Name/CIK:",
+                placeholder="e.g., Apple, 320193", # Updated placeholder
                 key='master_name_search'
             )
             
             # Apply Form Type Filter
             df_filtered = df_filtered[df_filtered['Form Type'].isin(selected_forms)]
             
-            # Apply Company Name Filter
+            # Apply Company Name/CIK Filter
             if search_query:
-                df_filtered = df_filtered[df_filtered['Company Name'].str.contains(search_query, case=False, na=False)]
+                # Search across Company Name and CIK columns
+                df_filtered = df_filtered[
+                    df_filtered['Company Name'].str.contains(search_query, case=False, na=False) |
+                    df_filtered['CIK'].str.contains(search_query, case=False, na=False)
+                ]
 
             # 3. Display Result
             st.markdown("---")
@@ -588,14 +637,27 @@ def main():
             # Sort by date for recent visibility and limit for display
             df_display = df_filtered.sort_values(by='Date Filed', ascending=False).head(500)[['Company Name', 'Form Type', 'Date Filed', 'Link', 'CIK']].copy()
             
+            # --- UX Improvement: Add a button column to copy CIK ---
+            df_display['Action'] = df_display['CIK'].apply(lambda x: f"CIK: {x}")
+            
             st.dataframe(
                 df_display,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
                     "Link": st.column_config.LinkColumn("View Filing", display_text="Open Document"),
-                    "CIK": st.column_config.Column("CIK", width="small")
-                }
+                    "CIK": st.column_config.Column("CIK", width="small", disabled=True),
+                    # Use a button column to trigger the callback
+                    "Action": st.column_config.ButtonColumn(
+                        "Use CIK", 
+                        help="Click to set this CIK in the 'Company Filings & Metrics' tab.", 
+                        on_click=update_target_cik, 
+                        # Use the CIK column value as the argument for the callback
+                        args=['CIK']
+                    )
+                },
+                # Hide the original CIK column as it is now in the Action button
+                column_order=['Company Name', 'Form Type', 'Date Filed', 'Link', 'Action']
             )
         else:
              st.info("Click 'Load Filings' above to download a massive SEC quarterly index file for browsing. You must load the data before filtering.")
