@@ -8,14 +8,19 @@ import re
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from bs4 import BeautifulSoup
+import numpy as np # Used for handling NaN in DataFrame operations
 
 # --- Firebase Imports (Needed for Watchlists) ---
 # Global variables are provided by the canvas environment
 try:
-    from firebase_admin import initialize_app, firestore, credentials, auth
+    import firebase_admin
+    from firebase_admin import initialize_app, firestore, credentials
+    # Note: Using credentials.Certificate is often the source of 'black screen' errors 
+    # when the key is not provided. We will fix the initialization below.
 except ImportError:
     st.error("Firebase Admin SDK is not installed. Please add 'firebase-admin' to requirements.txt.")
     st.stop()
+
 
 # --- Configuration & State ---
 # Initialize the user-agent headers. These will be updated from the sidebar inputs.
@@ -24,6 +29,10 @@ HEADERS = {
     'Accept-Encoding': 'gzip, deflate',
     'Host': 'www.sec.gov'
 }
+
+# Base URLs
+CIK_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+SUBMISSION_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 
 # Initialize session state for CIK storage and Watchlist
 if 'target_cik' not in st.session_state:
@@ -45,7 +54,7 @@ if 'user_id' not in st.session_state:
 if 'watchlists_loading' not in st.session_state:
     st.session_state.watchlists_loading = False
 
-# --- FIREBASE INITIALIZATION AND WATCHLIST HANDLERS ---
+# --- FIREBASE INITIALIZATION HANDLER (FIXED) ---
 
 def initialize_firebase():
     """Initializes Firebase and authenticates the user."""
@@ -58,56 +67,35 @@ def initialize_firebase():
         firebase_config = json.loads(globals().get('__firebase_config', '{}'))
         initial_auth_token = globals().get('__initial_auth_token', None)
         
-        # Firestore requires an Admin SDK service account key, but Streamlit/Canvas
-        # usually provides environment variables for the client-side Web SDK.
-        # Since we must use firebase-admin here, we'll try a generic approach 
-        # using the provided config for initialization (this is a common workaround 
-        # in environments that don't provide a service account key directly).
-        
-        # Use an empty creds object if running in a client environment context
-        # In a typical serverless container, this would require a service account file.
-        # We will use the fact that the environment provides a token for authentication.
-        
-        if not firebase_config:
+        if not firebase_config or not firebase_config.get('projectId'):
             st.warning("Firebase config is missing. Watchlist feature will not be persistent.")
             st.session_state.db = None
             return False
 
-        # Attempt to initialize Firebase App
-        # We use a dummy credential since the actual service account is hidden
-        cred = credentials.Certificate({
-            "type": "service_account",
-            "project_id": firebase_config.get('projectId', 'sec-app-project'),
-            "private_key_id": "dummy-key-id",
-            "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
-            "client_email": "dummy@dummy.iam.gserviceaccount.com",
-            "client_id": "1234567890",
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_x509_cert_url": "dummy-cert-url"
-        })
-        
-        # We use a known app name to prevent re-initialization error
+        # --- CRITICAL FIX START ---
+        # Instead of using credentials.Certificate with dummy data (which causes a black screen crash),
+        # we try to initialize the app relying on environment credentials or use the provided 
+        # project ID in a safe manner, handling potential re-initialization errors.
+
         try:
-             app = initialize_app(cred, name=app_id)
+            # Check if app is already initialized. Use get_app to retrieve.
+            app = firebase_admin.get_app(name=app_id)
         except ValueError:
-             app = initialize_app(cred, name=app_id) # Should not happen if name is unique
-        except:
-             app = initialize_app(cred) # Fallback
+            # If not initialized, try to initialize it without explicit credentials,
+            # relying on the platform's execution context for authentication.
+            app = initialize_app(name=app_id) 
+        except Exception as e:
+            st.error(f"Failed to initialize Firebase app: {e}")
+            st.session_state.db = None
+            return False
+        # --- CRITICAL FIX END ---
 
         st.session_state.db = firestore.client(app=app)
         st.session_state.app_id = app_id
         
-        # Use the provided auth token to get a consistent user ID
+        # Determine User ID (simulated using the provided auth token)
         if initial_auth_token:
-            # Note: auth.sign_in_with_custom_token is client-side. Here we simulate 
-            # getting the UID from the environment's context token.
-            # In this sandboxed environment, we'll assume the token grants us a UID.
-            
-            # Since we cannot run actual client-side auth, we rely on a placeholder UID
-            # If a token is present, we assume a unique, identifiable user.
-            # In a real deployed environment, the UID would be extracted from the token.
+            # Placeholder logic to derive a consistent UID from the token for Firestore
             st.session_state.user_id = "canvas_user_" + str(hash(initial_auth_token) % 1000000)
         else:
             # Anonymous or default user
@@ -120,6 +108,8 @@ def initialize_firebase():
         st.error(f"Error initializing Firebase. Watchlists will not be saved: {e}")
         st.session_state.db = None
         return False
+
+# --- WATCHLIST HANDLERS ---
 
 def get_watchlist_collection_ref():
     """Returns the Firestore collection reference for the user's private watchlists."""
@@ -151,10 +141,8 @@ def load_watchlists():
         docs = col_ref.stream()
         watchlists = {}
         for doc in docs:
-            # doc.id is the watchlist name
             data = doc.to_dict()
             if 'companies' in data:
-                 # companies is stored as a map {cik: name}
                 watchlists[doc.id] = data['companies']
         
         st.session_state.watchlists = watchlists
@@ -174,12 +162,10 @@ def save_watchlist(name, companies):
         return False
         
     try:
-        # Use the watchlist name as the document ID
         doc_ref = col_ref.document(name)
         doc_ref.set({"companies": companies})
         st.toast(f"Watchlist '{name}' saved successfully!")
-        # Force a refresh of the cached data
-        load_watchlists.clear()
+        load_watchlists.clear() # Clear cache to force reload
         st.session_state.watchlists[name] = companies
         return True
     except Exception as e:
@@ -188,11 +174,12 @@ def save_watchlist(name, companies):
 
 def add_company_to_watchlist_callback():
     """Callback to add a company to the currently selected watchlist."""
-    name = st.session_state.watchlist_name_to_add
+    # Renamed key for clarity
+    list_name = st.session_state.watchlist_select_box 
     cik_to_add = st.session_state.company_cik_input.strip()
     company_name_input = st.session_state.company_name_input.strip()
 
-    if not st.session_state.selected_watchlist:
+    if not list_name or list_name == "<No Watchlists>":
         st.warning("Please select or create a watchlist first.")
         return
 
@@ -201,16 +188,16 @@ def add_company_to_watchlist_callback():
         return
 
     # 1. Update the local state
-    current_list = st.session_state.watchlists.get(st.session_state.selected_watchlist, {})
+    current_list = st.session_state.watchlists.get(list_name, {})
+    # Pad CIK to 10 digits as required by SEC filing data
     current_list[cik_to_add.zfill(10)] = company_name_input or f"CIK {cik_to_add.zfill(10)}"
-    st.session_state.watchlists[st.session_state.selected_watchlist] = current_list
+    st.session_state.watchlists[list_name] = current_list
     
     # 2. Save to Firestore
-    if save_watchlist(st.session_state.selected_watchlist, current_list):
-        st.toast(f"Added {company_name_input} to '{st.session_state.selected_watchlist}'.")
-        # Clear inputs after success
+    if save_watchlist(list_name, current_list):
+        st.toast(f"Added {company_name_input} to '{list_name}'.")
         st.session_state.company_cik_input = ""
-        st.session_state.company_name_input = ""
+        st.session_state.company_name_input = "" # Clear inputs
 
 def create_watchlist_callback():
     """Callback to create a new watchlist."""
@@ -224,7 +211,8 @@ def create_watchlist_callback():
     
     # Create and save an empty list
     if save_watchlist(new_name, {}):
-        st.session_state.selected_watchlist = new_name
+        # Update the select box state to the newly created list
+        st.session_state.selected_watchlist = new_name 
         st.session_state.new_watchlist_name = ""
 
 def delete_company_from_watchlist_callback(cik_to_delete):
@@ -246,29 +234,21 @@ def delete_company_from_watchlist_callback(cik_to_delete):
     else:
         st.warning(f"CIK {cik_to_delete} not found in '{list_name}'.")
 
-
-# --- CALLBACK FUNCTIONS ---
+# --- GENERAL CALLBACK FUNCTIONS ---
 
 def update_target_cik(cik):
     """Callback to set the CIK input and main CIK state for the other tab."""
     st.session_state.cik_input_final = str(cik).zfill(10)
     st.session_state.target_cik = str(cik).zfill(10)
-    st.toast(f"CIK {cik} copied to the 'Company Filings' tab!")
+    st.toast(f"CIK {cik} copied to the 'Company Filings & Metrics' tab!")
 
-# --- CIK Lookup Function (Using Search API for Stability) ---
+# --- DATA FETCHING FUNCTIONS ---
 
-@st.cache_data(ttl=86400) # Cache CIK mapping for 24 hours to reduce load on SEC
+@st.cache_data(ttl=86400)
 def get_cik_data(ticker, headers):
-    """
-    Attempts to fetch the CIK and company name using the SEC's EDGAR full-text search.
-    """
+    """Fetches the CIK and company name using the SEC's EDGAR search."""
     SEARCH_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
-    
-    params = {
-        'action': 'getcompany',
-        'Company': ticker,
-        'output': 'xml' # Requesting XML output for easier parsing (it's actually a form of HTML)
-    }
+    params = {'action': 'getcompany', 'Company': ticker, 'output': 'xml'}
 
     try:
         sleep(0.5) 
@@ -276,21 +256,12 @@ def get_cik_data(ticker, headers):
         response.raise_for_status()
 
         found_cik = None
-        
-        # --- ROBUST CIK EXTRACTION (Attempt 1: CIK label) ---
         cik_match_1 = re.search(r'/edgar/data/(\d{10})/', response.text)
         
         if cik_match_1:
             found_cik = cik_match_1.group(1)
-            
-        # --- ROBUST CIK EXTRACTION (Attempt 2: CIK label with padded digits) ---
-        if not found_cik:
-             cik_match_2 = re.search(r'CIK:[^>]*?(\d{1,10})', response.text)
-             if cik_match_2:
-                found_cik = cik_match_2.group(1).zfill(10) # Pad to 10 digits
         
         if found_cik:
-            # Simple way to get the company name from the response title
             name_match = re.search(r'<title>(.+?) - S', response.text)
             company_name = name_match.group(1) if name_match else f"Ticker Search: {ticker}"
             return found_cik, company_name
@@ -298,21 +269,120 @@ def get_cik_data(ticker, headers):
         return None, None
         
     except requests.exceptions.RequestException as e:
-        # Ticker lookup service instability warning
-        st.warning("⚠️ Ticker Lookup Service Down ⚠️") 
-        st.error(f"Error: Could not use the SEC search API to find the CIK. Please enter the company's CIK manually.")
-        st.caption(f"Details: {e}")
+        st.error(f"Error during Ticker Lookup: {e}")
         return None, None
 
-# --- NEW: Secondary Filing List Fetcher (More robust than facts API 'listFilings') ---
+def search_cik_callback(app_name, email):
+    """Callback for the CIK Lookup button in the CIK Lookup tab."""
+    ticker_input = st.session_state.ticker_input_p
+    if not ticker_input:
+        st.warning("Please enter a stock ticker.")
+        return
+
+    with st.spinner(f"Searching for CIK for {ticker_input}..."):
+        # Update HEADERS locally for this call
+        local_headers = {'User-Agent': f'{app_name} / {email}', 'Accept-Encoding': 'gzip, deflate', 'Host': 'www.sec.gov'}
+        cik, company_name = get_cik_data(ticker_input, local_headers)
+
+        if cik:
+            st.success(f"Found CIK for {company_name}: **{cik}**")
+            st.session_state.target_cik = cik
+            st.session_state.cik_lookup_result = f"CIK: {cik}, Company: {company_name}"
+            # This is important: it sets the main CIK input for the other tab
+            st.session_state.cik_input_final = cik 
+        else:
+            st.error(f"Could not find a CIK for ticker: {ticker_input}")
+            st.session_state.cik_lookup_result = f"Could not find CIK for {ticker_input}"
+
+
+@st.cache_data(ttl=3600)
+def fetch_sec_company_facts(cik, headers):
+    """
+    Fetches the full company facts JSON from the SEC for detailed metrics.
+    """
+    padded_cik = str(cik).zfill(10)
+    url = CIK_FACTS_URL.format(cik=padded_cik)
+    
+    sleep(0.5) # SEC compliance
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching company facts for CIK {padded_cik}: {e}")
+        return None
+
+def extract_metric(facts_json, taxonomy, tag, unit='USD'):
+    """
+    Extracts the latest value and period for a specific financial metric.
+    """
+    if facts_json is None: return None, None
+
+    try:
+        # Navigate the facts JSON structure
+        data = facts_json['facts'][taxonomy][tag]['units'][unit]
+        
+        # Get the most recent non-empty value
+        # Data is a list of dicts, we sort by 'end' date to find the latest
+        data_sorted = sorted(data, key=lambda x: pd.to_datetime(x.get('end', '1900-01-01'), errors='coerce'), reverse=True)
+        
+        # Find the first data point that has a 'val'
+        for entry in data_sorted:
+            if 'val' in entry:
+                return entry['val'], entry.get('end', 'N/A')
+        
+        return None, None # No value found
+        
+    except KeyError:
+        return None, None # Metric not found
+
+
+def display_key_metrics(facts_json):
+    """
+    Displays key financial metrics in a readable format.
+    """
+    if facts_json is None:
+        return
+
+    company_name = facts_json.get('entityData', {}).get('name', 'N/A')
+    st.subheader(f"Key Metrics for {company_name}")
+
+    metrics_to_fetch = [
+        ("Assets (Total)", "us-gaap", "Assets", 'USD'),
+        ("Revenues (TTM)", "us-gaap", "Revenues", 'USD'),
+        ("Net Income (TTM)", "us-gaap", "NetIncomeLoss", 'USD'),
+        ("Cash (Latest)", "us-gaap", "CashAndCashEquivalentsAtCarryingValue", 'USD')
+    ]
+
+    metric_data = []
+    
+    for label, taxonomy, tag, unit in metrics_to_fetch:
+        value, date_end = extract_metric(facts_json, taxonomy, tag, unit)
+        
+        if value is not None:
+            formatted_value = f"${value:,.0f}" if value > 1000 else f"${value:,.2f}"
+        else:
+            formatted_value = "N/A"
+        
+        metric_data.append({"Metric": label, "Value": formatted_value, "As of": date_end or 'N/A'})
+
+    df_metrics = pd.DataFrame(metric_data)
+    
+    # Use columns for a card-like view
+    cols = st.columns(len(df_metrics))
+    for i, row in df_metrics.iterrows():
+        cols[i].metric(
+            label=row['Metric'], 
+            value=row['Value'], 
+            delta=f"As of {row['As of']}"
+        )
+
 
 @st.cache_data(ttl=3600)
 def fetch_edgar_filings_list(cik, headers):
-    """
-    Scrapes the company's EDGAR document list page for recent filings.
-    """
+    """Scrapes the company's EDGAR document list page for recent filings."""
     padded_cik = str(cik).zfill(10)
-    # The URL to the company's main EDGAR page listing all documents
     EDGAR_URL = f'https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={padded_cik}&type=&dateb=&owner=exclude&count=100'
     
     sleep(0.5) 
@@ -320,33 +390,26 @@ def fetch_edgar_filings_list(cik, headers):
     try:
         data_headers = headers.copy()
         data_headers['Host'] = 'www.sec.gov' 
-        
         response = requests.get(EDGAR_URL, headers=data_headers)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Look for the main table containing the filing list
         filings_table = soup.find('table', class_='tableFile2')
-        if not filings_table:
-            return []
+        if not filings_table: return []
 
         filings_data = []
-        # Iterate over all rows, skipping the header row
         for row in filings_table.find_all('tr')[1:]:
             cols = row.find_all('td')
-            if len(cols) >= 5: # Expect at least 5 columns
+            if len(cols) >= 5:
                 form_type = cols[0].text.strip()
                 date_filed = cols[3].text.strip()
-                
-                # Find the link to the document itself
                 document_link_tag = cols[1].find('a')
                 if document_link_tag:
                     relative_href = document_link_tag.get('href')
                     document_link = f"https://www.sec.gov{relative_href}"
                     filings_data.append({
-                        'CIK': padded_cik, # Add CIK for Watchlist merging
-                        'Company Name': '', # Will be filled by the caller for Watchlist
+                        'CIK': padded_cik, 
+                        'Company Name': '', 
                         'Filing Type': form_type,
                         'Filing Date': date_filed,
                         'Link': document_link,
@@ -356,88 +419,26 @@ def fetch_edgar_filings_list(cik, headers):
         return filings_data
 
     except requests.exceptions.RequestException as e:
-        # Error handling is done in the caller function for Watchlist tab
+        st.error(f"Error fetching EDGAR list: {e}")
         return []
 
-# --- Function to fetch a recent Master Index File ---
-
-@st.cache_data(ttl=86400) # Cache the massive index file for 24 hours
-def fetch_master_index_filings(year, qtr, headers):
-    """
-    Fetches and parses a quarterly master index file containing thousands of filings.
-    """
-    MASTER_INDEX_URL = f'https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{qtr}/master.idx'
-    
-    st.info(f"Fetching SEC Master Index for {year} Q{qtr}. This file contains thousands of filings and may take a moment to load.")
-    
-    sleep(0.5)
-    
-    try:
-        data_headers = headers.copy()
-        data_headers['Host'] = 'www.sec.gov' 
-        
-        response = requests.get(MASTER_INDEX_URL, headers=data_headers)
-        response.raise_for_status() 
-        
-        content = response.text
-        
-        # Check if the content is just the header
-        if len(content.splitlines()) < 12:
-            st.warning("The fetched index file appears to be empty or incomplete (only headers found). Try a different quarter.")
-            return pd.DataFrame()
-
-        # Skip the first 11 lines of header information
-        content_lines = content.splitlines()
-        data_lines = content_lines[11:] 
-        
-        data = StringIO("\n".join(data_lines))
-        df = pd.read_csv(data, sep='|', header=None, 
-                         names=['CIK', 'Company Name', 'Form Type', 'Date Filed', 'Filename'])
-        
-        df['CIK'] = df['CIK'].astype(str).str.zfill(10)
-        
-        def create_index_sec_link(row):
-             return f"https://www.sec.gov/Archives/{row['Filename']}"
-
-        df['Link'] = df.apply(create_index_sec_link, axis=1)
-
-        return df
-        
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching Master Index for {year} Q{qtr}: Failed to connect or received a bad response.")
-        st.caption(f"Details: {e}")
-        return pd.DataFrame()
-
-
-# --- Display Functions (omitted key metrics for brevity, focus on filings) ---
-
-def display_company_filings(data, cik, company_name, headers):
-    """
-    Displays the recent company filings using the robust scraping method.
-    """
+def display_company_filings(facts_json, cik, company_name, headers):
+    """Displays the recent company filings using the robust scraping method."""
     st.markdown("---")
     st.header(f"Recent Filings ({company_name})")
 
-    # 1. Fallback: Scrape the company's main EDGAR page (more reliable list)
-    with st.spinner(f"Fetching list of recent filings for {company_name} from the main EDGAR search page..."):
-        # Changed st.warning to st.info for the internal fallback, as requested
-        st.info("Structured filing list often missing from the facts API. Using the more robust EDGAR document search.")
+    with st.spinner(f"Fetching list of recent filings for {company_name}..."):
+        st.info("Using the robust EDGAR document search to ensure we capture all recent filings.")
         filings_for_df = fetch_edgar_filings_list(cik, headers)
         
-    
     if not filings_for_df:
-        st.warning("No recent filings data available from any source.")
+        st.warning("No recent filings data available.")
         return
 
     df = pd.DataFrame(filings_for_df)
-    
-    # Fill in the company name
     df['Company Name'] = company_name
 
-    # Identify all available filing types
     all_filing_types = set(df['Filing Type'].unique())
-    
-    # 1. Add Filing Type Filter
     default_selection = [t for t in ['10-K', '10-Q', '8-K', '4', 'S-1'] if t in all_filing_types]
     if not default_selection and all_filing_types:
         default_selection = sorted(list(all_filing_types))[:3]
@@ -454,11 +455,9 @@ def display_company_filings(data, cik, company_name, headers):
         return
         
     df_filtered = df[df['Filing Type'].isin(selected_types)]
-
-    # Limit to the top 20 recent filtered filings for a cleaner view
     df_display = df_filtered.head(20).copy()
 
-    df_final = df_display[['Filing Type', 'Filing Date', 'Company Name', 'Link']]
+    df_final = df_display[['Filing Type', 'Filing Date', 'Link']]
     
     st.dataframe(
         df_final,
@@ -471,7 +470,69 @@ def display_company_filings(data, cik, company_name, headers):
     st.caption(f"Showing {len(df_final)} of the most recent filtered filings for {company_name}.")
 
 
-# --- Watchlist Tab Display Function ---
+# --- Master Index Functions ---
+
+@st.cache_data(ttl=86400)
+def fetch_master_index_filings(year, qtr, headers):
+    """Fetches and parses a quarterly master index file."""
+    MASTER_INDEX_URL = f'https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{qtr}/master.idx'
+    st.info(f"Fetching SEC Master Index for {year} Q{qtr}. This file contains thousands of filings and may take a moment to load.")
+    sleep(0.5)
+    
+    try:
+        data_headers = headers.copy()
+        data_headers['Host'] = 'www.sec.gov' 
+        response = requests.get(MASTER_INDEX_URL, headers=data_headers)
+        response.raise_for_status() 
+        content = response.text
+        
+        if len(content.splitlines()) < 12:
+            st.warning("The fetched index file appears to be empty or incomplete. Try a different quarter.")
+            return pd.DataFrame()
+
+        content_lines = content.splitlines()
+        data_lines = content_lines[11:] 
+        
+        data = StringIO("\n".join(data_lines))
+        df = pd.read_csv(data, sep='|', header=None, 
+                         names=['CIK', 'Company Name', 'Form Type', 'Date Filed', 'Filename'])
+        
+        df['CIK'] = df['CIK'].astype(str).str.zfill(10)
+        df['Link'] = df['Filename'].apply(lambda x: f"https://www.sec.gov/Archives/{x}")
+
+        return df
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching Master Index for {year} Q{qtr}: {e}")
+        return pd.DataFrame()
+
+def load_master_index_callback(selected_key, index_options):
+    """Callback to load and store the master index file."""
+    if st.session_state.loaded_index_key == selected_key:
+        st.info("Index already loaded.")
+        return
+
+    year, qtr = index_options[selected_key]
+    
+    with st.spinner(f"Loading Master Index for {selected_key}..."):
+        df = fetch_master_index_filings(year, qtr, HEADERS)
+        
+        if not df.empty:
+            st.session_state.master_filings_df = df
+            st.session_state.loaded_index_key = selected_key
+            st.success(f"Successfully loaded {len(df):,} filings for {selected_key}.")
+        else:
+            st.session_state.master_filings_df = pd.DataFrame()
+            st.session_state.loaded_index_key = ""
+            st.error("Failed to load filings.")
+
+def clear_master_index_callback():
+    """Callback to clear the loaded master index data."""
+    st.session_state.master_filings_df = pd.DataFrame()
+    st.session_state.loaded_index_key = ""
+    st.toast("Master index data cleared.")
+
+# --- Watchlist Summary Display Function ---
 
 def display_watchlist_summary(watchlist_companies, headers):
     """
@@ -482,22 +543,23 @@ def display_watchlist_summary(watchlist_companies, headers):
         return
 
     st.header(f"Combined Recent Filings for Watchlist: {st.session_state.selected_watchlist}")
-    st.markdown(f"**Companies:** {len(watchlist_companies)} CIKs found.")
-
+    
     all_filings = []
     
-    with st.spinner("Fetching and combining recent filings from EDGAR for all companies in the watchlist..."):
-        
-        # Iterate over each company in the watchlist
-        for cik, name in watchlist_companies.items():
+    # We use st.cache_data here to cache the combined result for a period
+    @st.cache_data(ttl=600)
+    def fetch_combined_watchlist_filings(_companies, _headers):
+        combined_filings = []
+        for cik, name in _companies.items():
             st.caption(f"Fetching filings for {name} ({cik})...")
-            # Fetch the filing list using the robust scraper
-            filings = fetch_edgar_filings_list(cik, headers)
-            
-            # Add company name to the list before appending
+            filings = fetch_edgar_filings_list(cik, _headers)
             for filing in filings:
                 filing['Company Name'] = name
-                all_filings.append(filing)
+                combined_filings.append(filing)
+        return combined_filings
+
+    with st.spinner("Fetching and combining recent filings from EDGAR for all companies..."):
+        all_filings = fetch_combined_watchlist_filings(watchlist_companies, headers)
         
     if not all_filings:
         st.error("Could not retrieve any filings for the companies in this watchlist.")
@@ -505,12 +567,10 @@ def display_watchlist_summary(watchlist_companies, headers):
 
     df_raw = pd.DataFrame(all_filings)
     
-    # Ensure Date Filed is datetime for sorting and filtering
-    if df_raw['Filing Date'].dtype != '<M8[ns]':
-         df_raw['Filing Date'] = pd.to_datetime(df_raw['Filing Date'], errors='coerce')
-         df_raw.dropna(subset=['Filing Date'], inplace=True) # Drop rows where date conversion failed
+    # Process date column
+    df_raw['Filing Date'] = pd.to_datetime(df_raw['Filing Date'], errors='coerce')
+    df_raw.dropna(subset=['Filing Date'], inplace=True)
          
-    # --- Watchlist Filtering ---
     st.markdown("---")
     
     filter_cols = st.columns([1, 2])
@@ -527,7 +587,6 @@ def display_watchlist_summary(watchlist_companies, headers):
     # 2. Filing Type Filter
     all_forms = sorted(df_raw['Filing Type'].unique())
     default_forms = [f for f in ['10-K', '10-Q', '8-K', '4', 'S-1', 'D'] if f in all_forms]
-    
     selected_forms = filter_cols[1].multiselect(
         "Filter Filings by Type:",
         options=all_forms,
@@ -544,9 +603,8 @@ def display_watchlist_summary(watchlist_companies, headers):
     df_display = df_filtered.sort_values(by='Filing Date', ascending=False).head(500)
     
     st.subheader(f"Filtered Filings ({len(df_display):,} Found)")
-    st.caption(f"Showing the {len(df_display)} most recent filings from all companies in '{st.session_state.selected_watchlist}'.")
     
-    # Add a 'Use CIK' button column, similar to the Master Index tab
+    # Add a 'Use CIK' button column
     df_display['Action'] = df_display['CIK'].apply(lambda x: f"CIK: {x}")
     
     st.dataframe(
@@ -571,7 +629,7 @@ def display_watchlist_summary(watchlist_companies, headers):
 def main():
     st.set_page_config(
         page_title="SEC EDGAR Data Viewer",
-        layout="wide", # Use wide layout for better display of large dataframes
+        layout="wide", 
         initial_sidebar_state="expanded"
     )
     
@@ -580,22 +638,19 @@ def main():
     # --- Initialize Firebase and Load Watchlists ---
     firebase_ready = initialize_firebase()
     if firebase_ready:
+        # Load watchlists only if initialization was successful
         load_watchlists() 
 
     # --- Sidebar Setup ---
     
     # --- 1. SEC Compliance ---
     st.sidebar.header("SEC Compliance (Required)")
-    # Set default values for User-Agent
-    if 'app_name' not in st.session_state:
-        st.session_state.app_name = "Financial-Data-App"
-    if 'email' not in st.session_state:
-        st.session_state.email = "user@example.com"
+    if 'app_name' not in st.session_state: st.session_state.app_name = "Financial-Data-App"
+    if 'email' not in st.session_state: st.session_state.email = "user@example.com"
         
     app_name = st.sidebar.text_input("Application Name:", key='app_name')
     email = st.sidebar.text_input("Contact Email:", key='email')
     
-    # Update global HEADERS based on sidebar input
     HEADERS['User-Agent'] = f'{app_name} / {email}'
     
     # --- 2. Watchlist Management ---
@@ -606,26 +661,29 @@ def main():
         st.sidebar.error("Database unavailable. Watchlists cannot be managed.")
     else:
         
-        # Select Watchlist
         watchlist_names = list(st.session_state.watchlists.keys())
-        # Default to the first list if one exists and nothing is selected
-        default_index = watchlist_names.index(st.session_state.selected_watchlist) if st.session_state.selected_watchlist in watchlist_names else 0
-        if not st.session_state.selected_watchlist and watchlist_names:
-            st.session_state.selected_watchlist = watchlist_names[0]
-            
-        st.session_state.selected_watchlist = st.sidebar.selectbox(
+        # Add a placeholder if no lists exist
+        options_list = watchlist_names if watchlist_names else ["<No Watchlists>"]
+        
+        # Determine the default index for the select box
+        default_index = 0
+        if st.session_state.selected_watchlist in watchlist_names:
+            default_index = watchlist_names.index(st.session_state.selected_watchlist)
+        
+        # Select Watchlist
+        selected_list_name = st.sidebar.selectbox(
             "Select Watchlist:",
-            options=watchlist_names if watchlist_names else ["<No Watchlists>"],
-            index=default_index if watchlist_names else 0,
+            options=options_list,
+            index=default_index,
             key='watchlist_select_box'
         )
+        st.session_state.selected_watchlist = selected_list_name # Update main state
         
         # Display current companies in the selected watchlist
-        if st.session_state.selected_watchlist and st.session_state.selected_watchlist != "<No Watchlists>":
-            current_list = st.session_state.watchlists.get(st.session_state.selected_watchlist, {})
+        if selected_list_name and selected_list_name != "<No Watchlists>":
+            current_list = st.session_state.watchlists.get(selected_list_name, {})
             st.sidebar.caption(f"**{len(current_list)}** companies in list.")
             
-            # Allow user to see/delete companies from the list
             with st.sidebar.expander("Current Companies"):
                 if current_list:
                     companies_df = pd.DataFrame(
@@ -638,7 +696,7 @@ def main():
                         col_name.text(f"{row['Name']} ({row['CIK'][-4:]})")
                         col_delete.button(
                             "🗑️", 
-                            key=f"delete_{row['CIK']}_{index}", 
+                            key=f"delete_{row['CIK']}", 
                             help="Remove from watchlist",
                             on_click=delete_company_from_watchlist_callback,
                             args=(row['CIK'],)
@@ -647,15 +705,15 @@ def main():
                     st.write("List is currently empty.")
 
 
-        st.sidebar.markdown("##### Add New Company")
+        st.sidebar.markdown("##### Add New Company to Selected List")
         st.sidebar.text_input("Company Name (optional):", key='company_name_input')
         st.sidebar.text_input("CIK (e.g., 320193):", key='company_cik_input', max_chars=10)
         
         st.sidebar.button(
-            f"Add to '{st.session_state.selected_watchlist}'" if st.session_state.selected_watchlist else "Add",
+            f"Add to '{selected_list_name}'" if selected_list_name and selected_list_name != "<No Watchlists>" else "Add Company",
             on_click=add_company_to_watchlist_callback,
             key='add_company_button',
-            disabled=(st.session_state.selected_watchlist is None or st.session_state.selected_watchlist == "<No Watchlists>")
+            disabled=(selected_list_name is None or selected_list_name == "<No Watchlists>")
         )
         
         st.sidebar.markdown("##### Create New Watchlist")
@@ -690,69 +748,122 @@ def main():
     # --- 2. Company Filings & Metrics Tab (Main Working Feature) ---
     with tab_data:
         st.header("Fetch Data by CIK")
-        st.markdown(
-            """
-            Use this section to fetch detailed financial metrics and recent filings 
-            for a **single company** identified by its Central Index Key (CIK).
-            """
-        )
+        st.markdown("Use this section to fetch detailed financial metrics and recent filings for a **single company** identified by its Central Index Key (CIK).")
         
         # CIK Input Section
-        cik_input = st.text_input(
+        target_cik = st.text_input(
             "Central Index Key (CIK):", 
             value=st.session_state.target_cik, 
             max_chars=10,
             placeholder="e.g., 320193",
-            key='cik_input_final' # Unique key for this input
+            key='cik_input_final'
         ).strip()
         
         if st.button("Fetch Financials & Filings", key='fetch_data_button'):
-            target_cik = cik_input
             
             if not target_cik.isdigit():
                 st.error("Please enter a valid numeric CIK to fetch data.")
                 return
 
-            # Check for placeholder compliance values before fetching
             if app_name.strip() == "Financial-Data-App" or email.strip() == "user@example.com":
                  st.warning("Please update the Application Name and Contact Email in the sidebar for SEC compliance.")
 
-            # Placeholder for fetch_sec_company_facts (omitted for brevity)
-            # Placeholder code to fetch facts and display key metrics
-            
-            st.info("To save space, the full fact fetching code is omitted here, but the filing display is shown:")
-            
-            # Example call to display filings
-            display_company_filings({}, target_cik, f"Placeholder Name CIK:{target_cik}", HEADERS)
+            # 1. Fetch Company Facts (for Metrics)
+            with st.spinner(f"Fetching company facts for CIK {target_cik}..."):
+                facts_json = fetch_sec_company_facts(target_cik, HEADERS)
+
+            if facts_json:
+                company_name = facts_json.get('entityData', {}).get('name', f"CIK {target_cik}")
+                display_key_metrics(facts_json)
+                
+                # 2. Fetch and Display Filings
+                display_company_filings(facts_json, target_cik, company_name, HEADERS)
+            else:
+                st.error(f"Failed to retrieve financial facts for CIK {target_cik}. Please verify the CIK is correct.")
 
 
     # --- 3. Daily Filings Index Tab (Non-Company Specific Feature) ---
     with tab_daily_index:
         st.header("Browse Recent SEC Filings Index")
-        # Existing index code goes here (omitted for brevity, but the logic remains the same)
-        st.warning("Index code omitted for brevity. Please refer to the previous full code block for the implementation of the Master Index and its filters.")
-
-        # Placeholder to ensure the necessary callback logic is defined
-        def load_master_index_callback(selected_key, index_options): pass
-        def clear_master_index_callback(): pass
         
-        index_options = {"2025 Q3 (July - Sep)": (2025, 3), "2025 Q2 (Apr - Jun)": (2025, 2)}
-        selected_key = st.selectbox("Choose Index:", options=list(index_options.keys()), index=0, key='index_quarter_select_p')
-        st.button("Load Filings (Placeholder)", on_click=load_master_index_callback, args=(selected_key, index_options))
-        # ... rest of the master index display logic ...
+        # Define recent index options (relative to today's date for freshness)
+        current_date = date.today()
+        current_year = current_date.year
+        current_qtr = (current_date.month - 1) // 3 + 1
+        
+        index_options = {}
+        for i in range(4): # Show last 4 quarters
+            qtr_end_date = current_date - relativedelta(months=3 * i)
+            year = qtr_end_date.year
+            qtr = (qtr_end_date.month - 1) // 3 + 1
+            start_month = ['Jan', 'Apr', 'Jul', 'Oct'][qtr - 1]
+            end_month = ['Mar', 'Jun', 'Sep', 'Dec'][qtr - 1]
+            key = f"{year} Q{qtr} ({start_month} - {end_month})"
+            index_options[key] = (year, qtr)
 
+        selected_key = st.selectbox(
+            "Choose Master Index Quarter:", 
+            options=list(index_options.keys()), 
+            index=0, 
+            key='index_quarter_select'
+        )
+        
+        col1, col2 = st.columns([1, 1])
+        col1.button("Load Filings", on_click=load_master_index_callback, args=(selected_key, index_options))
+        col2.button("Clear Loaded Data", on_click=clear_master_index_callback)
+        
+        df = st.session_state.master_filings_df
+        if not df.empty:
+            st.subheader(f"Filings for {st.session_state.loaded_index_key} ({len(df):,} Total)")
+            
+            # Filtering
+            unique_forms = sorted(df['Form Type'].unique())
+            form_filter = st.multiselect(
+                "Filter by Form Type:", 
+                options=unique_forms, 
+                default=[f for f in ['10-K', '10-Q', '8-K'] if f in unique_forms],
+                key='master_index_form_filter'
+            )
+            
+            df_filtered = df[df['Form Type'].isin(form_filter)]
+            
+            st.caption(f"Showing {len(df_filtered):,} filtered filings.")
+
+            # Create a button column for CIK usage
+            df_display = df_filtered.head(50).copy()
+            df_display['Action'] = df_display['CIK'].apply(lambda x: f"CIK: {x}")
+            
+            st.dataframe(
+                df_display[['Company Name', 'Form Type', 'Date Filed', 'Link', 'Action']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Link": st.column_config.LinkColumn("View Filing", display_text="Open Document"),
+                    "Action": st.column_config.ButtonColumn(
+                        "Use CIK", 
+                        help="Click to set this CIK in the 'Company Filings & Metrics' tab.", 
+                        on_click=update_target_cik, 
+                        args=['CIK']
+                    )
+                },
+                column_order=['Company Name', 'Form Type', 'Date Filed', 'Link', 'Action']
+            )
 
     # --- 4. CIK Lookup (Experimental) Tab ---
     with tab_lookup:
         st.header("Search CIK by Ticker (Experimental)")
-        # Existing CIK lookup code goes here (omitted for brevity, but the logic remains the same)
-        st.warning("CIK Lookup code omitted for brevity. The functionality is included in the full code block but is unstable.")
-
-        def search_cik_callback(app_name, email): pass
+        st.caption("This uses the SEC's search engine and can sometimes be unreliable or slow.")
+        
         ticker_input = st.text_input("Enter Stock Ticker:", value="", key='ticker_input_p').strip().upper()
-        st.button("Search CIK (Placeholder)", on_click=search_cik_callback, args=(app_name, email))
+        
+        st.button(
+            "Search CIK", 
+            on_click=search_cik_callback, 
+            args=(app_name, email)
+        )
+        
+        if 'cik_lookup_result' in st.session_state and st.session_state.cik_lookup_result:
+            st.markdown(f"**Result:** {st.session_state.cik_lookup_result}")
 
 if __name__ == '__main4__':
-    # Add 'firebase-admin' to the requirements.txt file
-    # Ensure the code can run without the full details of omitted functions for testing purposes
     main()
