@@ -11,6 +11,7 @@ const FLASH_MODEL_NAME = "gemini-2.5-flash-preview-" + "09" + "-2025";
 // Global variables provided by the Canvas environment
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+// FIX: The initialAuthToken is a JWT string, not JSON, so we remove JSON.parse().
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // --- UTILITY FUNCTIONS ---
@@ -143,11 +144,9 @@ const SecFilingsTab = ({ setMessage }) => {
                     {/* Inject Analysis Content from LLM */}
                     <div className="analysis-content text-gray-300 mb-6" dangerouslySetInnerHTML={{ __html: filingData.text }} />
                     
-                    {/* CRITICAL FIX: Replaced fractional EM units with integer PX units 
-                        to bypass the parser's 'invalid decimal literal' error. 
-                        1em -> 16px, 1.5em -> 24px, 0.5em -> 8px.
-                    */}
+                    {/* CRITICAL FIX: Custom CSS for Markdown rendering. Using PX units to avoid 'invalid decimal literal' parser errors. */}
                     <style>{`
+                        /* CSS injected here to ensure proper formatting of LLM markdown output */
                         .analysis-content p { margin-bottom: 16px; }
                         .analysis-content ul { 
                             list-style: disc; 
