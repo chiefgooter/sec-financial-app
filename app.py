@@ -19,7 +19,8 @@ def get_cik_from_ticker(ticker, headers):
     Fetches the SEC company_tickers.json mapping file and looks up the CIK 
     using a given stock ticker.
     """
-    TICKER_TO_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
+    # *** FIX APPLIED HERE *** # The original URL was giving a 404 error. This alternative endpoint is more robust.
+    TICKER_TO_CIK_URL = "https://www.sec.gov/files/company-tickers/edgar_company_tickers.json"
     
     try:
         # Implementing a small delay to respect the SEC's rate limit
@@ -30,16 +31,18 @@ def get_cik_from_ticker(ticker, headers):
         
         ticker_upper = ticker.upper()
         
-        # Iterate through the large JSON dictionary to find a match
-        for item in ticker_data.values():
+        # Iterate through the list of dictionaries (where each item is a company)
+        # Note: The structure of the new endpoint returns a list of dictionaries, not a dictionary of dictionaries.
+        for item in ticker_data:
             if item['ticker'] == ticker_upper:
                 # Returns the CIK (which is the CIK string padded to 10 digits)
-                return str(item['cik_str']).zfill(10), item['title']
+                # 'cik' key is now 'cik_str' in this endpoint.
+                return str(item['cik']).zfill(10), item['title']
 
         return None, None # Ticker not found
         
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching ticker mapping data: {e}")
+        st.error(f"Error fetching ticker mapping data: {e}. Check the URL in the code or SEC API status.")
         return None, None
 
 # --- Core Data Fetching Function ---
