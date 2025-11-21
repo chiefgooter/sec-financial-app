@@ -104,9 +104,8 @@ def fetch_sec_filings(ticker, limit=100):
         # Robustly access the 'recent' filings dictionary
         filings = data.get('filings', {}).get('recent', {})
         
-        # --- START FIX: Enhanced Data Structure Check ---
+        # --- Enhanced Data Structure Check ---
         if not filings:
-            # This is the most likely cause of the "unexpected data format" error if the CIK lookup passed.
             return [], (f"SEC API Error: Filing structure missing in response for {ticker}. "
                         f"This may indicate a temporary SEC issue or rate limit blockage.")
 
@@ -119,10 +118,10 @@ def fetch_sec_filings(ticker, limit=100):
         num_filings = min(len(filing_dates), len(filing_types), len(accession_numbers))
         
         if num_filings == 0:
-            # If the lists exist but are empty (or were not found and defaulted to []).
-             return [], (f"SEC API Error: Found company data for {ticker}, but zero recent filings "
-                         f"were available or the data was malformed (num_filings=0).")
-        # --- END FIX ---
+            # --- START FIX: More detailed error message ---
+             return [], (f"SEC API Error: Found company data for {ticker}, but zero filings were processed. "
+                         f"Filings lengths found: Dates={len(filing_dates)}, Types={len(filing_types)}, Accession={len(accession_numbers)}.")
+            # --- END FIX ---
         
         # 3. Iterate and Construct Filing Objects
         for i in range(num_filings):
