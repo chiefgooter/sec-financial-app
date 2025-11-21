@@ -5,6 +5,7 @@ from google import genai
 from google.genai.errors import APIError
 import time
 import pandas as pd
+import json
 
 # --- Configuration ---
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -66,7 +67,7 @@ h1, h2, h3 {
 @st.cache_data(ttl=3600, show_spinner="Fetching structured SEC Filings data...")
 def fetch_sec_filings(ticker, limit=100):
     """
-    Fetches the CIK and then the last 100 recent filings (10-K, 10-Q, 8-K) 
+    Fetches the CIK and then the last 100 recent filings (10-K, 10-Q, 8-K, S-1, S-3) 
     directly from the SEC's EDGAR API.
     """
     # SEC requires a user-agent header
@@ -103,7 +104,13 @@ def fetch_sec_filings(ticker, limit=100):
         # Robustly access the 'recent' filings dictionary
         filings = data.get('filings', {}).get('recent', {})
         
-        # Robustly extract lists for required columns, defaulting to empty lists if missing
+        # --- START FIX: Enhanced Data Structure Check ---
+        if not filings:
+            # This is the most likely cause of the "unexpected data format" error if the CIK lookup passed.
+            return [], (f"SEC API Error: Filing structure missing in response for {ticker}. "
+                        f"This may indicate a temporary SEC issue or rate limit blockage.")
+
+        # Robustly extract lists for required columns
         filing_dates = filings.get('filingDate', [])
         filing_types = filings.get('type', [])
         accession_numbers = filings.get('accessionNumber', [])
@@ -111,10 +118,11 @@ def fetch_sec_filings(ticker, limit=100):
         # The length of the lists should be the same. Use the shortest length just in case.
         num_filings = min(len(filing_dates), len(filing_types), len(accession_numbers))
         
-        # Check if the overall recent data section is usable (we need at least one filing)
-        if num_filings == 0 and (filing_dates or filing_types or accession_numbers):
-             # This means lists were found, but were empty or mismatched in size, though for MSFT it should be large.
-             return [], f"No recent filings found or unexpected data format for {ticker}."
+        if num_filings == 0:
+            # If the lists exist but are empty (or were not found and defaulted to []).
+             return [], (f"SEC API Error: Found company data for {ticker}, but zero recent filings "
+                         f"were available or the data was malformed (num_filings=0).")
+        # --- END FIX ---
         
         # 3. Iterate and Construct Filing Objects
         for i in range(num_filings):
@@ -150,8 +158,16 @@ def fetch_sec_filings(ticker, limit=100):
         return recent_filings, None
     
     except requests.exceptions.HTTPError as e:
-        return [], f"SEC API HTTP Error: {e}. The SEC may be blocking the request or the ticker may be invalid. Check console for details."
+        # Print to console for debugging
+        print(f"DEBUG: SEC API HTTP Error for {ticker}: {e}") 
+        return [], f"SEC API HTTP Error: {e}. The SEC may be blocking the request or the ticker may be invalid."
+    except json.JSONDecodeError as e:
+        # Print to console for debugging
+        print(f"DEBUG: SEC JSON Decode Error for {ticker}: {e}. Response status: {filings_response.status_code if 'filings_response' in locals() else 'N/A'}")
+        return [], f"SEC API Error: Could not decode JSON response. The SEC may have sent malformed data due to rate limiting or blocking."
     except Exception as e:
+        # Print to console for debugging
+        print(f"DEBUG: An unexpected error during SEC data fetching for {ticker}: {e}")
         return [], f"An unexpected error occurred during SEC data fetching: {e}"
 
 
