@@ -60,25 +60,28 @@ h1, h2, h3 {
 """, unsafe_allow_html=True)
 
 
-# --- Core Analysis Function ---
+# --- Core Search Function (Updated logic) ---
 
-@st.cache_data(show_spinner="Searching for SEC Filings and Analyzing Content...")
-def analyze_filings(ticker):
+@st.cache_data(show_spinner="Searching for recent SEC Filings...")
+def search_filings(ticker):
     """
-    Uses the Gemini API with Google Search Grounding to find and summarize SEC filings.
-    Implements exponential backoff for resilience.
+    Uses the Gemini API with Google Search Grounding to find and list recent SEC filings, 
+    and provides a link to the full filing history.
     """
     if not client:
         return "Error: Gemini client is not initialized.", []
 
+    # New prompt: asks for a list but also includes the link to the full filing history
     system_prompt = (
-        "Act as an expert financial analyst. Find the most recent 10-K and 10-Q SEC filings for the specified company. "
-        "Summarize the key risks and opportunities from the 'Management's Discussion and Analysis' section of each filing "
-        "into concise, detailed bullet points. Include at least two key points for both risks and opportunities from each "
-        "filing type (10-K and 10-Q). Only return the summarized analysis text. Do NOT include a list of citation URIs, "
-        "as Streamlit will display them separately."
+        "Act as an expert financial researcher. Your response must begin with a Markdown hyperlink "
+        "to the company's full filing history on the SEC EDGAR website, using the following template: "
+        "'[View all SEC Filings for {TICKER} on EDGAR](https://www.sec.gov/edgar/browse/?CIK={TICKER})'. "
+        "After this link, list the filing type, the filing date, and a direct URL link for the most recent "
+        "10-K, 10-Q, and 8-K SEC filings you can find, up to a maximum of 10 total. "
+        "Format the list as a Markdown list where each item is a hyperlink using the filing name and date as the display text. "
+        "Example list item format: * [10-Q filed 2024-10-25](http://example.com/url)."
     )
-    user_query = f"Find the latest 10-K and 10-Q filings for the company with ticker {ticker} and summarize the key MD&A points."
+    user_query = f"Provide a comprehensive list of recent SEC filings (10-K, 10-Q, 8-K) and the full EDGAR search link for {ticker}."
 
     # Exponential Backoff Implementation
     retries = 3
@@ -90,7 +93,7 @@ def analyze_filings(ticker):
                 model=GEMINI_MODEL,
                 contents=user_query,
                 config=genai.types.GenerateContentConfig(
-                    system_instruction=system_prompt,
+                    system_instruction=system_prompt.replace("{TICKER}", ticker), # Inject Ticker into System Prompt
                     tools=[{"google_search": {}}]
                 )
             )
@@ -98,7 +101,7 @@ def analyze_filings(ticker):
             # Extract generated text
             generated_text = response.text
 
-            # --- FINAL ROBUST SOURCE EXTRACTION LOGIC (using getattr) ---
+            # --- ROBUST SOURCE EXTRACTION LOGIC (using getattr) ---
             sources = []
             candidate = response.candidates[0] if response.candidates else None
             
@@ -123,7 +126,7 @@ def analyze_filings(ticker):
                                     'uri': uri,
                                     'title': title
                                 })
-            # --- END FINAL ROBUST SOURCE EXTRACTION LOGIC ---
+            # --- END ROBUST SOURCE EXTRACTION LOGIC ---
             
             return generated_text, sources
 
@@ -134,13 +137,13 @@ def analyze_filings(ticker):
                 delay *= 2
             else:
                 st.error(f"API Error: Failed after {retries} attempts. {e}")
-                return "Analysis failed due to an API connection error.", []
+                return "Search failed due to an API connection error.", []
         except Exception as e:
             # This catch-all ensures we display the specific error, even if it's new
             st.error(f"An unexpected error occurred: {e}")
-            return "Analysis failed due to an unexpected error.", []
+            return "Search failed due to an unexpected error.", []
             
-    return "Analysis failed to complete.", []
+    return "Search failed to complete.", []
 
 
 # --- Streamlit App Layout ---
@@ -149,7 +152,7 @@ def main_app():
     st.title("Integrated Financial Dashboard")
     st.markdown("---")
 
-    # --- Sidebar Input Section (New Location) ---
+    # --- Sidebar Input Section ---
     st.sidebar.markdown("### SEC Filing Search")
     
     ticker_input = st.sidebar.text_input(
@@ -163,10 +166,11 @@ def main_app():
     if 'selected_tab' not in st.session_state:
         st.session_state['selected_tab'] = "SEC Filings Analyzer"
         
-    if st.sidebar.button("Analyze Filings", key="sidebar_analyze_button"):
+    # Button text changed to "Search Filings"
+    if st.sidebar.button("Search Filings", key="sidebar_analyze_button"):
         if ticker_input:
             st.session_state['analysis_ticker'] = ticker_input
-            st.session_state['run_analysis'] = True
+            st.session_state['run_search'] = True
             # Set the selected tab to the Analyzer when the button is pressed
             st.session_state['selected_tab'] = "SEC Filings Analyzer"
         else:
@@ -190,29 +194,28 @@ def main_app():
         st.header("Welcome to Your Dashboard")
         st.info("Select 'SEC Filings Analyzer' or use the search box above to begin using the AI-powered tools.")
         st.markdown("### User Information")
-        # In a full Firebase integrated app, you'd show real user data here.
         st.code("Current App State: Python Streamlit Application")
 
     elif st.session_state['selected_tab'] == "SEC Filings Analyzer":
-        st.header("SEC Filings Analyzer")
-        st.markdown("Use AI to quickly summarize the key risks and opportunities from the latest 10-K and 10-Q filings.")
+        st.header("SEC Filings Search Results")
+        st.markdown("Use AI to quickly find recent 10-K, 10-Q, and 8-K filings for the specified ticker, and get a link to the full filing history.")
 
-        # --- Analysis Execution and Display ---
-        if 'run_analysis' in st.session_state and st.session_state['run_analysis']:
+        # --- Search Execution and Display ---
+        if 'run_search' in st.session_state and st.session_state['run_search']:
             st.markdown("---")
             # Ensure we have a ticker to analyze, default to MSFT if none has been searched yet
-            ticker_to_analyze = st.session_state.get('analysis_ticker', 'MSFT')
-            st.subheader(f"Analysis for: {ticker_to_analyze}")
+            ticker_to_search = st.session_state.get('analysis_ticker', 'MSFT')
+            st.subheader(f"Recent Filings for: {ticker_to_search}")
 
-            # Run the analysis function
-            summary_text, sources = analyze_filings(ticker_to_analyze)
+            # Run the search function (renamed from analyze_filings)
+            search_results_markdown, sources = search_filings(ticker_to_search)
             
-            # Display Summary
-            st.markdown("### AI Summary of MD&A")
-            st.write(summary_text)
+            # Display Search Results
+            st.markdown("### Filings List")
+            st.markdown(search_results_markdown) # Use st.markdown to render the Markdown list/links
 
             # Display Sources (Citations)
-            st.markdown("### Grounding Sources")
+            st.markdown("### Grounding Sources (Sources used to generate the list)")
             if sources:
                 for source in sources:
                     st.markdown(f"• [{source['title']}]({source['uri']})")
@@ -220,10 +223,7 @@ def main_app():
                 st.info("No external sources were specifically cited for this response.")
             
             # Reset flag
-            st.session_state['run_analysis'] = False
-        else:
-            # Display initial guidance when the tab is first selected or analysis hasn't run
-            st.info("Enter a stock ticker in the sidebar and click 'Analyze Filings' to view the summary.")
+            st.session_state['run_search'] = False
 
 
 if __name__ == "__main__":
