@@ -66,110 +66,135 @@ h1, h2, h3 {
 # --- Core Search Function (Direct SEC EDGAR API) ---
 
 @st.cache_data(ttl=3600, show_spinner="Fetching structured SEC Filings data...")
-def fetch_sec_filings(ticker, limit=100):
+def fetch_sec_filings(ticker, limit=100, max_retries=3):
     """
     Fetches the CIK and then the last 100 recent filings (10-K, 10-Q, 8-K, S-1, S-3) 
-    directly from the SEC's EDGAR API.
+    directly from the SEC's EDGAR API, including retry logic for malformed data.
     """
     # SEC requires a user-agent header
-    # NOTE: SEC has strict limits on requests. Use proper headers and caching.
     headers = {'User-Agent': 'FinancialDashboardApp / myname@example.com'} 
     
+    # --- 1. Get CIK (Central Index Key) for the Ticker (Always outside retry loop) ---
+    cik_number = None
     try:
-        # 1. Get CIK (Central Index Key) for the Ticker
         cik_lookup_url = f"https://www.sec.gov/files/company_tickers.json"
-        
         cik_response = requests.get(cik_lookup_url, headers=headers)
         cik_response.raise_for_status()
         cik_map = cik_response.json()
         
-        # Find the correct CIK
-        cik_number = None
         for item in cik_map.values():
             if item['ticker'] == ticker.upper():
                 cik_number = str(item['cik_str']).zfill(10) # Pad CIK to 10 digits
                 break
-
+        
         if not cik_number:
             return [], f"SEC API Error: Could not find CIK for ticker {ticker}. Please verify the ticker symbol."
 
-        # Add a small delay to mitigate sequential SEC API throttling
-        time.sleep(0.5) 
-        
-        # 2. Get Filings using the CIK
-        filings_url = f"https://data.sec.gov/submissions/CIK{cik_number}.json"
-        
-        filings_response = requests.get(filings_url, headers=headers)
-        filings_response.raise_for_status()
-        data = filings_response.json()
-        
-        recent_filings = []
-        
-        # Robustly access the 'recent' filings dictionary
-        filings = data.get('filings', {}).get('recent', {})
-        
-        # --- Enhanced Data Structure Check ---
-        if not filings:
-            return [], (f"SEC API Error: Filing structure missing in response for {ticker}. "
-                        f"This may indicate a temporary SEC issue or rate limit blockage.")
-
-        # Robustly extract lists for required columns
-        filing_dates = filings.get('filingDate', [])
-        filing_types = filings.get('type', [])
-        accession_numbers = filings.get('accessionNumber', [])
-
-        # The length of the lists should be the same. Use the shortest length just in case.
-        num_filings = min(len(filing_dates), len(filing_types), len(accession_numbers))
-        
-        if num_filings == 0:
-             return [], (f"SEC API Error: Found company data for {ticker}, but zero filings were processed. "
-                         f"Filings lengths found: Dates={len(filing_dates)}, Types={len(filing_types)}, Accession={len(accession_numbers)}.")
-        
-        # 3. Iterate and Construct Filing Objects
-        for i in range(num_filings):
-            filing_type = filing_types[i]
-            
-            # Filter to common types and respect the limit
-            if filing_type in ['10-K', '10-Q', '8-K', 'S-3', 'S-1'] and len(recent_filings) < limit:
-                
-                accession_number = accession_numbers[i]
-                filing_date = filing_dates[i]
-                
-                # Construct the direct filing URL (link to the full HTML index)
-                accession_no_cleansed = accession_number.replace('-', '')
-                
-                document_url = (
-                    f"https://www.sec.gov/Archives/edgar/data/{data['cik']}/"
-                    f"{accession_no_cleansed}/{accession_number}-index.html"
-                )
-
-                recent_filings.append({
-                    'Type': filing_type,
-                    'Date': filing_date,
-                    'Filing Name': f"{filing_type} filed on {filing_date}",
-                    'Accession No.': accession_number,
-                    'URL': document_url
-                })
-        
-        if not recent_filings:
-            # If we successfully parsed the data but the filtered list is empty
-            return [], f"Found data for {ticker}, but no 10-K, 10-Q, 8-K, S-1, or S-3 filings were in the top {limit} results."
-
-
-        return recent_filings, None
-    
-    except requests.exceptions.HTTPError as e:
-        # Print to console for debugging
-        print(f"DEBUG: SEC API HTTP Error for {ticker}: {e}") 
-        return [], f"SEC API HTTP Error: {e}. The SEC may be blocking the request or the ticker may be invalid."
-    except json.JSONDecodeError as e:
-        # Print to console for debugging
-        print(f"DEBUG: SEC JSON Decode Error for {ticker}: {e}. Response status: {filings_response.status_code if 'filings_response' in locals() else 'N/A'}")
-        return [], f"SEC API Error: Could not decode JSON response. The SEC may have sent malformed data due to rate limiting or blocking."
     except Exception as e:
-        # Print to console for debugging
-        print(f"DEBUG: An unexpected error during SEC data fetching for {ticker}: {e}")
-        return [], f"An unexpected error occurred during SEC data fetching: {e}"
+        return [], f"An error occurred during CIK lookup: {e}"
+
+    # --- 2. Get Filings using the CIK (Retry Loop) ---
+    final_error = None
+    for attempt in range(max_retries):
+        try:
+            # Add a small delay for sequential requests (doubled on each attempt)
+            time.sleep(0.5 + 2 * attempt) 
+            
+            filings_url = f"https://data.sec.gov/submissions/CIK{cik_number}.json"
+            
+            filings_response = requests.get(filings_url, headers=headers)
+            filings_response.raise_for_status()
+            data = filings_response.json()
+            
+            recent_filings = []
+            
+            # Robustly access the 'recent' filings dictionary
+            filings = data.get('filings', {}).get('recent', {})
+            
+            if not filings:
+                final_error = (f"SEC API Error: Filing structure missing in response for {ticker}. "
+                            f"This may indicate a temporary SEC issue or rate limit blockage.")
+                continue # Retry if data is completely missing
+
+            # Robustly extract lists for required columns
+            filing_dates = filings.get('filingDate', [])
+            filing_types = filings.get('type', [])
+            accession_numbers = filings.get('accessionNumber', [])
+
+            # The length of the lists should be the same. Use the shortest length for safety.
+            num_filings = min(len(filing_dates), len(filing_types), len(accession_numbers))
+            
+            if num_filings == 0:
+                # This is the exact error scenario we are trying to fix (Types=0)
+                current_error = (f"SEC API Error: Found company data for {ticker}, but zero filings were processed. "
+                                f"Filings lengths found: Dates={len(filing_dates)}, Types={len(filing_types)}, Accession={len(accession_numbers)}.")
+                
+                if attempt < max_retries - 1:
+                    st.toast(f"Filing data malformed (Attempt {attempt + 1}/{max_retries}). Retrying in {2 * (attempt + 1)}s...")
+                    continue # Retry
+                else:
+                    final_error = current_error
+                    break # Stop retrying
+            
+            # --- Success: Parse Filings ---
+            for i in range(num_filings):
+                filing_type = filing_types[i]
+                
+                # Filter to common types and respect the limit
+                if filing_type in ['10-K', '10-Q', '8-K', 'S-3', 'S-1'] and len(recent_filings) < limit:
+                    
+                    accession_number = accession_numbers[i]
+                    filing_date = filing_dates[i]
+                    
+                    # Construct the direct filing URL (link to the full HTML index)
+                    accession_no_cleansed = accession_number.replace('-', '')
+                    
+                    document_url = (
+                        f"https://www.sec.gov/Archives/edgar/data/{data['cik']}/"
+                        f"{accession_no_cleansed}/{accession_number}-index.html"
+                    )
+
+                    recent_filings.append({
+                        'Type': filing_type,
+                        'Date': filing_date,
+                        'Filing Name': f"{filing_type} filed on {filing_date}",
+                        'Accession No.': accession_number,
+                        'URL': document_url
+                    })
+            
+            if not recent_filings:
+                # If we successfully parsed the data but the filtered list is empty
+                return [], f"Found data for {ticker}, but no 10-K, 10-Q, 8-K, S-1, or S-3 filings were in the top {limit} results."
+            
+            # Successful retrieval and parsing
+            return recent_filings, None
+    
+        except requests.exceptions.HTTPError as e:
+            # Critical error like 403 or 404, usually means a block or bad ticker. Don't retry.
+            return [], f"SEC API HTTP Error: {e}. The SEC may be blocking the request or the ticker may be invalid."
+        
+        except json.JSONDecodeError as e:
+            # Response was not valid JSON. Likely a rate limit or server issue. Retry if possible.
+            current_error = f"SEC API Error: Could not decode JSON response. Status: {filings_response.status_code if 'filings_response' in locals() else 'N/A'}."
+            if attempt < max_retries - 1:
+                st.toast(f"JSON Decode Error (Attempt {attempt + 1}/{max_retries}). Retrying in {2 * (attempt + 1)}s...")
+                continue
+            else:
+                final_error = current_error
+                break # Stop retrying
+        
+        except Exception as e:
+            # General unexpected error. Retry if possible.
+            current_error = f"An unexpected error occurred during SEC data fetching: {type(e).__name__} - {e}"
+            if attempt < max_retries - 1:
+                st.toast(f"General Error (Attempt {attempt + 1}/{max_retries}). Retrying in {2 * (attempt + 1)}s...")
+                continue
+            else:
+                final_error = current_error
+                break # Stop retrying
+    
+    # If the loop finished without a successful return, return the final error
+    return [], final_error
 
 
 # --- Streamlit App Layout ---
@@ -229,6 +254,7 @@ def main_app():
             st.subheader(f"Recent Filings (up to 100) for: {ticker_to_search}")
 
             # 1. Fetch Filings
+            # The retry logic is now inside this function
             filings_list, error_message = fetch_sec_filings(ticker_to_search, limit=100)
             
             # 2. Handle Errors
