@@ -70,11 +70,11 @@ def fetch_sec_filings(ticker, limit=100):
     directly from the SEC's EDGAR API.
     """
     # SEC requires a user-agent header
+    # NOTE: SEC has strict limits on requests. Use proper headers and caching.
     headers = {'User-Agent': 'FinancialDashboardApp / myname@example.com'} 
     
     try:
         # 1. Get CIK (Central Index Key) for the Ticker
-        # This API provides the mapping from ticker to CIK
         cik_lookup_url = f"https://www.sec.gov/files/company_tickers.json"
         
         cik_response = requests.get(cik_lookup_url, headers=headers)
@@ -100,28 +100,31 @@ def fetch_sec_filings(ticker, limit=100):
         
         recent_filings = []
         
-        # Use .get() for safe dictionary access (prevents crash if 'filings' or 'recent' are missing)
+        # Robustly access the 'recent' filings dictionary
         filings = data.get('filings', {}).get('recent', {})
         
-        # NEW DEFENSIVE CHECK: Ensure all required keys exist before starting the loop
-        required_keys = ['filingDate', 'type', 'accessionNumber']
-        if not all(k in filings for k in required_keys):
-             # This handles cases where 'recent' is present but empty, or missing expected keys
-             return [], f"No recent filings found or unexpected data format for {ticker}."
+        # Robustly extract lists for required columns, defaulting to empty lists if missing
+        filing_dates = filings.get('filingDate', [])
+        filing_types = filings.get('type', [])
+        accession_numbers = filings.get('accessionNumber', [])
 
-        # Get the length based on filingDate (assuming all lists are the same length)
-        num_filings = len(filings['filingDate'])
+        # The length of the lists should be the same. Use the shortest length just in case.
+        num_filings = min(len(filing_dates), len(filing_types), len(accession_numbers))
         
-        # Combine lists of filing data from the JSON structure
+        # Check if the overall recent data section is usable (we need at least one filing)
+        if num_filings == 0 and (filing_dates or filing_types or accession_numbers):
+             # This means lists were found, but were empty or mismatched in size, though for MSFT it should be large.
+             return [], f"No recent filings found or unexpected data format for {ticker}."
+        
+        # 3. Iterate and Construct Filing Objects
         for i in range(num_filings):
-            # Accessing the keys should be safe now
-            filing_type = filings['type'][i]
+            filing_type = filing_types[i]
             
             # Filter to common types and respect the limit
             if filing_type in ['10-K', '10-Q', '8-K', 'S-3', 'S-1'] and len(recent_filings) < limit:
                 
-                accession_number = filings['accessionNumber'][i]
-                filing_date = filings['filingDate'][i]
+                accession_number = accession_numbers[i]
+                filing_date = filing_dates[i]
                 
                 # Construct the direct filing URL (link to the full HTML index)
                 accession_no_cleansed = accession_number.replace('-', '')
@@ -139,12 +142,16 @@ def fetch_sec_filings(ticker, limit=100):
                     'URL': document_url
                 })
         
+        if not recent_filings:
+            # If we successfully parsed the data but the filtered list is empty
+            return [], f"Found data for {ticker}, but no 10-K, 10-Q, 8-K, S-1, or S-3 filings were in the top {limit} results."
+
+
         return recent_filings, None
     
     except requests.exceptions.HTTPError as e:
-        return [], f"SEC API HTTP Error: {e}. Check console for details."
+        return [], f"SEC API HTTP Error: {e}. The SEC may be blocking the request or the ticker may be invalid. Check console for details."
     except Exception as e:
-        # Now, if an error happens here (like IndexError if lists mismatch), it will be caught.
         return [], f"An unexpected error occurred during SEC data fetching: {e}"
 
 
@@ -210,6 +217,9 @@ def main_app():
             if error_message:
                 st.error(error_message)
                 st.session_state['run_search'] = False
+                # If the error is not about finding filings, log it.
+                if "no 10-K, 10-Q, 8-K" not in error_message:
+                    st.toast("Filing fetch error. Check console for details.", icon="⚠️")
                 return
 
             # 3. Display Filings in a Scrollable, Selectable Dataframe
@@ -250,7 +260,8 @@ def main_app():
                         "For example, you could ask the AI to summarize the 'Risk Factors' section."
                     )
             else:
-                st.info(f"No recent 10-K, 10-Q, or 8-K filings found for {ticker_to_search}.")
+                # This is the expected output if no matching filings were found, and is handled above.
+                st.info(f"No recent 10-K, 10-Q, or 8-K filings found for {ticker_to_search} in the top 100 results.")
             
             # Reset flag
             st.session_state['run_search'] = False
