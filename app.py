@@ -65,23 +65,21 @@ h1, h2, h3 {
 @st.cache_data(show_spinner="Searching for recent SEC Filings...")
 def search_filings(ticker):
     """
-    Uses the Gemini API with Google Search Grounding to find and list recent SEC filings, 
-    and provides a link to the full filing history.
+    Uses the Gemini API with Google Search Grounding to find and list recent SEC filings.
+    The function now only returns the formatted list of filings.
     """
     if not client:
         return "Error: Gemini client is not initialized.", []
 
-    # MODIFIED SYSTEM PROMPT: Removed the introductory sentence that was causing clutter.
+    # MODIFIED SYSTEM PROMPT: Now only instructs the AI to return the numbered list.
     system_prompt = (
-        "Act as an expert financial researcher. Your response must begin with a Markdown hyperlink "
-        "to the company's full filing history on the SEC EDGAR website, using the following template: "
-        "'[View all SEC Filings for {TICKER} on EDGAR](https://www.sec.gov/edgar/browse/?CIK={TICKER})'. "
-        "Directly following this link, list the filing type, the filing date, and a direct URL link for the most recent "
+        "Act as an expert financial researcher. List the filing type, the filing date, and a direct URL link for the most recent "
         "10-K, 10-Q, and 8-K SEC filings you can find, up to a maximum of 10 total. "
         "Format the list as a single, numbered Markdown list where each item is a hyperlink using the filing name and date as the display text. "
-        "Example list item format: 1. [10-Q filed 2024-10-25](http://example.com/url)."
+        "Example list item format: 1. [10-Q filed 2024-10-25](http://example.com/url). "
+        "Do NOT include any introductory or concluding remarks, or the link to the full EDGAR history."
     )
-    user_query = f"Provide a comprehensive list of recent SEC filings (10-K, 10-Q, 8-K) and the full EDGAR search link for {ticker}."
+    user_query = f"Provide a list of recent SEC filings (10-K, 10-Q, 8-K) for {ticker}."
 
     # Exponential Backoff Implementation
     retries = 3
@@ -93,7 +91,7 @@ def search_filings(ticker):
                 model=GEMINI_MODEL,
                 contents=user_query,
                 config=genai.types.GenerateContentConfig(
-                    system_instruction=system_prompt.replace("{TICKER}", ticker), # Inject Ticker into System Prompt
+                    system_instruction=system_prompt,
                     tools=[{"google_search": {}}]
                 )
             )
@@ -198,21 +196,25 @@ def main_app():
 
     elif st.session_state['selected_tab'] == "SEC Filings Analyzer":
         st.header("SEC Filings Search Results")
-        st.markdown("Use AI to quickly find recent 10-K, 10-Q, and 8-K filings for the specified ticker, and get a link to the full filing history.")
+        st.markdown("Use AI to quickly find recent 10-K, 10-Q, and 8-K filings for the specified ticker.")
 
         # --- Search Execution and Display ---
         if 'run_search' in st.session_state and st.session_state['run_search']:
             st.markdown("---")
             # Ensure we have a ticker to analyze, default to MSFT if none has been searched yet
             ticker_to_search = st.session_state.get('analysis_ticker', 'MSFT')
-            st.subheader(f"Recent Filings for: {ticker_to_search}") # Keep this header clear and distinct
+            st.subheader(f"Recent Filings for: {ticker_to_search}")
+
+            # NEW: Display the "View all filings" link first, using Streamlit code, not AI output
+            sec_edgar_url = f"https://www.sec.gov/edgar/browse/?CIK={ticker_to_search}"
+            st.markdown(f"[View all SEC Filings for {ticker_to_search} on EDGAR]({sec_edgar_url})")
 
             # Run the search function
             search_results_markdown, sources = search_filings(ticker_to_search)
             
             # Display Search Results
-            st.header("Filings List") # Changed from subheader to header for clearer separation
-            st.markdown(search_results_markdown) # This will render the single block of Markdown text
+            st.header("Filings List")
+            st.markdown(search_results_markdown) # This will ONLY render the numbered list of filings
 
             # Display Sources (Citations)
             st.markdown("### Grounding Sources (Sources used to generate the list)")
