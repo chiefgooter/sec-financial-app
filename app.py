@@ -99,10 +99,22 @@ def fetch_sec_filings(ticker, limit=100):
         data = filings_response.json()
         
         recent_filings = []
-        filings = data['filings']['recent']
+        
+        # Use .get() for safe dictionary access (prevents crash if 'filings' or 'recent' are missing)
+        filings = data.get('filings', {}).get('recent', {})
+        
+        # NEW DEFENSIVE CHECK: Ensure all required keys exist before starting the loop
+        required_keys = ['filingDate', 'type', 'accessionNumber']
+        if not all(k in filings for k in required_keys):
+             # This handles cases where 'recent' is present but empty, or missing expected keys
+             return [], f"No recent filings found or unexpected data format for {ticker}."
+
+        # Get the length based on filingDate (assuming all lists are the same length)
+        num_filings = len(filings['filingDate'])
         
         # Combine lists of filing data from the JSON structure
-        for i in range(len(filings['filingDate'])):
+        for i in range(num_filings):
+            # Accessing the keys should be safe now
             filing_type = filings['type'][i]
             
             # Filter to common types and respect the limit
@@ -127,11 +139,12 @@ def fetch_sec_filings(ticker, limit=100):
                     'URL': document_url
                 })
         
-        return recent_filings, None # Second return value is for error message
+        return recent_filings, None
     
     except requests.exceptions.HTTPError as e:
         return [], f"SEC API HTTP Error: {e}. Check console for details."
     except Exception as e:
+        # Now, if an error happens here (like IndexError if lists mismatch), it will be caught.
         return [], f"An unexpected error occurred during SEC data fetching: {e}"
 
 
