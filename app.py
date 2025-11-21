@@ -98,14 +98,18 @@ def analyze_filings(ticker):
             # Extract generated text
             generated_text = response.text
 
-            # Extract grounding sources (citations)
+            # Extract grounding sources (citations) - FIX APPLIED HERE
             sources = []
-            if response.candidates and response.candidates[0].grounding_metadata:
-                for attribution in response.candidates[0].grounding_metadata.grounding_attributions:
-                    if attribution.web and attribution.web.uri:
+            candidate = response.candidates[0] if response.candidates else None
+
+            if candidate and candidate.grounding_metadata and candidate.grounding_metadata.grounding_attributions:
+                for attribution in candidate.grounding_metadata.grounding_attributions:
+                    # Safely access web attribution details
+                    web_data = getattr(attribution, 'web', None)
+                    if web_data and getattr(web_data, 'uri', None):
                         sources.append({
-                            'uri': attribution.web.uri,
-                            'title': attribution.web.title or 'External Source'
+                            'uri': web_data.uri,
+                            'title': web_data.title or 'External Source'
                         })
             
             return generated_text, sources
