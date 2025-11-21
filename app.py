@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 from google import genai
 from google.genai.errors import APIError
 import time
+import pandas as pd
 
 # --- Configuration ---
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -60,88 +61,78 @@ h1, h2, h3 {
 """, unsafe_allow_html=True)
 
 
-# --- Core Search Function (Updated logic) ---
+# --- Core Search Function (Direct SEC EDGAR API) ---
 
-@st.cache_data(show_spinner="Searching for recent SEC Filings...")
-def search_filings(ticker):
+@st.cache_data(ttl=3600, show_spinner="Fetching structured SEC Filings data...")
+def fetch_sec_filings(ticker, limit=100):
     """
-    Uses the Gemini API with Google Search Grounding to find and list recent SEC filings.
-    The function now only returns the formatted list of filings.
+    Fetches the CIK and then the last 100 recent filings (10-K, 10-Q, 8-K) 
+    directly from the SEC's EDGAR API.
     """
-    if not client:
-        return "Error: Gemini client is not initialized.", []
-
-    # MODIFIED SYSTEM PROMPT: Now only instructs the AI to return the numbered list.
-    system_prompt = (
-        "Act as an expert financial researcher. List the filing type, the filing date, and a direct URL link for the most recent "
-        "10-K, 10-Q, and 8-K SEC filings you can find, up to a maximum of 10 total. "
-        "Format the list as a single, numbered Markdown list where each item is a hyperlink using the filing name and date as the display text. "
-        "Example list item format: 1. [10-Q filed 2024-10-25](http://example.com/url). "
-        "Do NOT include any introductory or concluding remarks, or the link to the full EDGAR history."
-    )
-    user_query = f"Provide a list of recent SEC filings (10-K, 10-Q, 8-K) for {ticker}."
-
-    # Exponential Backoff Implementation
-    retries = 3
-    delay = 2  # seconds
+    # SEC requires a user-agent header
+    headers = {'User-Agent': 'FinancialDashboardApp / myname@example.com'} 
     
-    for attempt in range(retries):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=user_query,
-                config=genai.types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    tools=[{"google_search": {}}]
-                )
-            )
+    try:
+        # 1. Get CIK (Central Index Key) for the Ticker
+        # This API provides the mapping from ticker to CIK
+        cik_lookup_url = f"https://www.sec.gov/files/company_tickers.json"
+        
+        cik_response = requests.get(cik_lookup_url, headers=headers)
+        cik_response.raise_for_status()
+        cik_map = cik_response.json()
+        
+        # Find the correct CIK
+        cik_number = None
+        for item in cik_map.values():
+            if item['ticker'] == ticker.upper():
+                cik_number = str(item['cik_str']).zfill(10) # Pad CIK to 10 digits
+                break
 
-            # Extract generated text
-            generated_text = response.text
+        if not cik_number:
+            return [], f"SEC API Error: Could not find CIK for ticker {ticker}. Please verify the ticker symbol."
 
-            # --- ROBUST SOURCE EXTRACTION LOGIC (using getattr) ---
-            sources = []
-            candidate = response.candidates[0] if response.candidates else None
+        # 2. Get Filings using the CIK
+        filings_url = f"https://data.sec.gov/submissions/CIK{cik_number}.json"
+        
+        filings_response = requests.get(filings_url, headers=headers)
+        filings_response.raise_for_status()
+        data = filings_response.json()
+        
+        recent_filings = []
+        filings = data['filings']['recent']
+        
+        # Combine lists of filing data from the JSON structure
+        for i in range(len(filings['filingDate'])):
+            filing_type = filings['type'][i]
             
-            if candidate:
-                grounding_metadata = getattr(candidate, 'grounding_metadata', None)
+            # Filter to common types and respect the limit
+            if filing_type in ['10-K', '10-Q', '8-K', 'S-3', 'S-1'] and len(recent_filings) < limit:
                 
-                if grounding_metadata:
-                    # Safely retrieve the attributions list
-                    attributions = getattr(grounding_metadata, 'grounding_attributions', [])
-                    
-                    for attribution in attributions:
-                        # Safely retrieve the 'web' object
-                        web_data = getattr(attribution, 'web', None)
-                        
-                        if web_data:
-                            # Safely retrieve uri and title
-                            uri = getattr(web_data, 'uri', None)
-                            title = getattr(web_data, 'title', 'External Source')
+                accession_number = filings['accessionNumber'][i]
+                filing_date = filings['filingDate'][i]
+                
+                # Construct the direct filing URL (link to the full HTML index)
+                accession_no_cleansed = accession_number.replace('-', '')
+                
+                document_url = (
+                    f"https://www.sec.gov/Archives/edgar/data/{data['cik']}/"
+                    f"{accession_no_cleansed}/{accession_number}-index.html"
+                )
 
-                            if uri:
-                                sources.append({
-                                    'uri': uri,
-                                    'title': title
-                                })
-            # --- END ROBUST SOURCE EXTRACTION LOGIC ---
-            
-            return generated_text, sources
-
-        except APIError as e:
-            if attempt < retries - 1:
-                st.warning(f"API Error (Attempt {attempt + 1}): {e}. Retrying in {delay} seconds...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                st.error(f"API Error: Failed after {retries} attempts. {e}")
-                return "Search failed due to an API connection error.", []
-        except Exception as e:
-            # This catch-all ensures we display the specific error, even if it's new
-            st.error(f"An unexpected error occurred: {e}")
-            return "Search failed due to an unexpected error.", []
-            
-    return "Search failed to complete.", []
+                recent_filings.append({
+                    'Type': filing_type,
+                    'Date': filing_date,
+                    'Filing Name': f"{filing_type} filed on {filing_date}",
+                    'Accession No.': accession_number,
+                    'URL': document_url
+                })
+        
+        return recent_filings, None # Second return value is for error message
+    
+    except requests.exceptions.HTTPError as e:
+        return [], f"SEC API HTTP Error: {e}. Check console for details."
+    except Exception as e:
+        return [], f"An unexpected error occurred during SEC data fetching: {e}"
 
 
 # --- Streamlit App Layout ---
@@ -160,16 +151,13 @@ def main_app():
         key="sidebar_ticker_input"
     ).upper()
     
-    # Check if the session state for the selected tab exists
     if 'selected_tab' not in st.session_state:
         st.session_state['selected_tab'] = "SEC Filings Analyzer"
         
-    # Button text changed to "Search Filings"
     if st.sidebar.button("Search Filings", key="sidebar_analyze_button"):
         if ticker_input:
             st.session_state['analysis_ticker'] = ticker_input
             st.session_state['run_search'] = True
-            # Set the selected tab to the Analyzer when the button is pressed
             st.session_state['selected_tab'] = "SEC Filings Analyzer"
         else:
             st.sidebar.warning("Please enter a ticker symbol.")
@@ -177,14 +165,12 @@ def main_app():
     # --- Sidebar Navigation (Below Input) ---
     st.sidebar.title("Navigation")
     
-    # We use the session state to control the initial value of the radio button
     selected_tab = st.sidebar.radio(
         "Go to",
         ("SEC Filings Analyzer", "Dashboard"),
         index=0 if st.session_state['selected_tab'] == "SEC Filings Analyzer" else 1,
         key="navigation_radio"
     )
-    # Update session state if the user changes the radio button
     st.session_state['selected_tab'] = selected_tab
 
 
@@ -196,33 +182,62 @@ def main_app():
 
     elif st.session_state['selected_tab'] == "SEC Filings Analyzer":
         st.header("SEC Filings Search Results")
-        st.markdown("Use AI to quickly find recent 10-K, 10-Q, and 8-K filings for the specified ticker.")
+        st.markdown("Select a filing from the list below to analyze or view.")
 
         # --- Search Execution and Display ---
         if 'run_search' in st.session_state and st.session_state['run_search']:
             st.markdown("---")
-            # Ensure we have a ticker to analyze, default to MSFT if none has been searched yet
             ticker_to_search = st.session_state.get('analysis_ticker', 'MSFT')
-            st.subheader(f"Recent Filings for: {ticker_to_search}")
+            st.subheader(f"Recent Filings (up to 100) for: {ticker_to_search}")
 
-            # NEW: Display the "View all filings" link first, using Streamlit code, not AI output
-            sec_edgar_url = f"https://www.sec.gov/edgar/browse/?CIK={ticker_to_search}"
-            st.markdown(f"[View all SEC Filings for {ticker_to_search} on EDGAR]({sec_edgar_url})")
-
-            # Run the search function
-            search_results_markdown, sources = search_filings(ticker_to_search)
+            # 1. Fetch Filings
+            filings_list, error_message = fetch_sec_filings(ticker_to_search, limit=100)
             
-            # Display Search Results
-            st.header("Filings List")
-            st.markdown(search_results_markdown) # This will ONLY render the numbered list of filings
+            # 2. Handle Errors
+            if error_message:
+                st.error(error_message)
+                st.session_state['run_search'] = False
+                return
 
-            # Display Sources (Citations)
-            st.markdown("### Grounding Sources (Sources used to generate the list)")
-            if sources:
-                for source in sources:
-                    st.markdown(f"• [{source['title']}]({source['uri']})")
+            # 3. Display Filings in a Scrollable, Selectable Dataframe
+            if filings_list:
+                df = pd.DataFrame(filings_list)
+                
+                # Drop the URL column for the display, but keep it for selection logic
+                df_display = df.drop(columns=['URL', 'Accession No.'])
+                
+                st.markdown("**Click a row below to select a filing.**")
+                
+                # Use st.dataframe with selection enabled for easy scrolling and selection
+                selected_rows = st.dataframe(
+                    df_display, 
+                    height=400, # Set height to make it scrollable
+                    use_container_width=True,
+                    hide_index=True,
+                    column_order=("Type", "Date", "Filing Name"),
+                    selection_mode="single-row"
+                )
+
+                # 4. Handle Selection
+                if selected_rows.selection and selected_rows.selection['rows']:
+                    selected_index = selected_rows.selection['rows'][0]
+                    selected_filing = df.iloc[selected_index]
+                    
+                    st.markdown("---")
+                    st.subheader(f"Selected Filing: {selected_filing['Filing Name']}")
+                    
+                    # Provide direct link to the filing
+                    st.markdown(
+                        f"**View Full Filing:** [{selected_filing['Accession No.']}]({selected_filing['URL']})"
+                    )
+                    
+                    # Placeholder for AI Analysis based on selection
+                    st.info(
+                        "**Next Step:** You can now integrate the Gemini API here to analyze the content of this specific filing! "
+                        "For example, you could ask the AI to summarize the 'Risk Factors' section."
+                    )
             else:
-                st.info("No external sources were specifically cited for this response.")
+                st.info(f"No recent 10-K, 10-Q, or 8-K filings found for {ticker_to_search}.")
             
             # Reset flag
             st.session_state['run_search'] = False
