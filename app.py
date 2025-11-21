@@ -24,7 +24,7 @@ try:
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     else:
         # Fallback or development setup (will likely fail on deployment if key is missing)
-        st.error("Gemini API Key not found in Streamlit secrets.")
+        st.error("Gemini API Key not found in Streamlit secrets. Please check .streamlit/secrets.toml.")
         client = None 
 except Exception as e:
     st.error(f"Error initializing Gemini client: {e}")
@@ -59,13 +59,16 @@ st.markdown("""
 h1, h2, h3 {
     color: #58a6ff; /* Blue accents */
 }
+.stCode {
+    background-color: #161b22;
+}
 </style>
 """, unsafe_allow_html=True)
 
 
 # --- Core Search Function (Direct SEC EDGAR API) ---
 
-# REMOVED @st.cache_data - we rely on the retry loop for reliability
+# This function remains unchanged, as the issue is external (SEC rate limit)
 def fetch_sec_filings(ticker, limit=100, max_retries=5): 
     """
     Fetches the CIK and then the last 100 recent filings (10-K, 10-Q, 8-K, S-1, S-3) 
@@ -98,7 +101,6 @@ def fetch_sec_filings(ticker, limit=100, max_retries=5):
     for attempt in range(max_retries):
         try:
             # Increased delay significantly to respect aggressive SEC rate limiting.
-            # Base 5 seconds + 5 seconds per attempt.
             wait_time = 5.0 + 5 * attempt 
             st.toast(f"Attempt {attempt + 1}/{max_retries}: Waiting {wait_time:.1f}s before fetching filings.", icon="⏳")
             time.sleep(wait_time) 
@@ -130,7 +132,6 @@ def fetch_sec_filings(ticker, limit=100, max_retries=5):
                                 f"Filings lengths found: Dates={len(filing_dates)}, Types=0, Accession={len(accession_numbers)}. Retrying...")
                 
                 if attempt < max_retries - 1:
-                    # Update final_error for diagnostic purposes if all retries fail, but continue looping
                     final_error = current_error 
                     continue # Explicitly retry
                 else:
@@ -141,8 +142,6 @@ def fetch_sec_filings(ticker, limit=100, max_retries=5):
             num_filings = min(len(filing_dates), len(filing_types), len(accession_numbers))
             
             if num_filings == 0:
-                # This should only happen if all lists are 0, which is less likely than Types=0, 
-                # but we keep the check for completeness.
                 current_error = (f"SEC API Error: Found company data for {ticker}, but zero filings were processed. "
                                 f"Filings lengths found: Dates={len(filing_dates)}, Types={len(filing_types)}, Accession={len(accession_numbers)}.")
                 
@@ -180,50 +179,129 @@ def fetch_sec_filings(ticker, limit=100, max_retries=5):
                     })
             
             if not recent_filings:
-                # If we successfully parsed the data but the filtered list is empty
                 return [], f"Found data for {ticker}, but no 10-K, 10-Q, or 8-K filings were in the top {limit} results."
             
-            # Successful retrieval and parsing
             return recent_filings, None
     
         except requests.exceptions.HTTPError as e:
-            # Critical error like 403 or 404. Don't retry, just fail with the error.
             return [], f"SEC API HTTP Error: {e}. The SEC may be blocking the request or the ticker may be invalid."
         
         except json.JSONDecodeError as e:
-            # Response was not valid JSON. Likely a severe rate limit. Retry if possible.
             current_error = f"SEC API Error: Could not decode JSON response. Status: {filings_response.status_code if 'filings_response' in locals() else 'N/A'}."
             if attempt < max_retries - 1:
                 final_error = current_error
                 continue
             else:
                 final_error = current_error
-                break # Stop retrying
+                break 
         
         except Exception as e:
-            # General unexpected error. Retry if possible.
             current_error = f"An unexpected error occurred during SEC data fetching: {type(e).__name__} - {e}"
             if attempt < max_retries - 1:
                 final_error = current_error
                 continue
             else:
                 final_error = current_error
-                break # Stop retrying
+                break 
     
-    # If the loop finished without a successful return, return the final error
     return [], final_error
+
+
+# --- NEW: Scraping and Analysis Functions ---
+
+def scrape_filing_content(filing_url):
+    """Fetches and cleans the text content from the main filing document."""
+    try:
+        # SEC requires a user-agent header for all requests
+        headers = {'User-Agent': 'FinancialDashboardApp / myname@example.com'} 
+        
+        # We need to find the link to the primary HTML document within the index page
+        index_response = requests.get(filing_url, headers=headers)
+        index_response.raise_for_status()
+        
+        index_soup = BeautifulSoup(index_response.content, 'html.parser')
+        
+        # Common pattern: find the main document link (usually PDF or HTM)
+        # We look for the first link with an HMT or HTML extension that isn't the index itself
+        main_doc_link = index_soup.find('a', href=lambda href: href and (href.endswith('.htm') or href.endswith('.html')) and 'index' not in href.lower())
+        
+        if not main_doc_link:
+            return None, "Error: Could not find the main HTML document link within the filing index."
+
+        main_doc_path = main_doc_link['href']
+        
+        # Construct the full URL for the main document
+        base_url = filing_url.rsplit('/', 1)[0] + '/'
+        main_doc_url = base_url + main_doc_path
+
+        # Fetch the main document
+        doc_response = requests.get(main_doc_url, headers=headers)
+        doc_response.raise_for_status()
+        
+        doc_soup = BeautifulSoup(doc_response.content, 'html.parser')
+        
+        # Extract text, removing script and style tags
+        for script_or_style in doc_soup(["script", "style"]):
+            script_or_style.decompose()
+            
+        # Get all text and clean up whitespace
+        text = doc_soup.get_text()
+        clean_text = ' '.join(text.split())
+        
+        # Truncate text to fit within the Gemini API context window (roughly 128,000 tokens)
+        # We will truncate to 500,000 characters to be safe.
+        MAX_CHARS = 500000 
+        if len(clean_text) > MAX_CHARS:
+            st.warning(f"Filing content was truncated from {len(clean_text):,} to {MAX_CHARS:,} characters to fit the API context window.")
+            clean_text = clean_text[:MAX_CHARS]
+        
+        return clean_text, None
+
+    except requests.exceptions.RequestException as e:
+        return None, f"Network/HTTP Error during scraping: {e}"
+    except Exception as e:
+        return None, f"An unexpected error occurred during scraping: {e}"
+
+
+def analyze_filing_content(content, analysis_prompt):
+    """Calls the Gemini API to analyze the scraped content."""
+    if not client:
+        return "Gemini client is not initialized due to missing API key."
+    
+    system_instruction = (
+        "You are a world-class financial analyst specializing in SEC filings. "
+        "Your task is to analyze the provided SEC filing text based on the user's prompt. "
+        "Provide a concise, professional, and accurate summary or analysis. "
+        "Only use the information provided in the SEC text."
+    )
+    
+    user_query = f"Based on the following SEC document text, provide the requested analysis:\n\n-- DOCUMENT TEXT --\n{content}\n\n-- ANALYSIS REQUEST --\n{analysis_prompt}"
+    
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=user_query,
+            config=dict(
+                system_instruction=system_instruction
+            )
+        )
+        return response.text
+    except APIError as e:
+        return f"Gemini API Error: {e}. Check your API key and usage limits."
+    except Exception as e:
+        return f"An unexpected error occurred during AI analysis: {e}"
 
 
 # --- Streamlit App Layout ---
 
 def main_app():
+    # ... (rest of main_app setup remains the same) ...
     st.title("Integrated Financial Dashboard")
     st.markdown("---")
 
     # --- Sidebar Input Section ---
     st.sidebar.markdown("### SEC Filing Search")
     
-    # Use MSFT as the default input for convenience
     ticker_input = st.sidebar.text_input(
         "Enter Ticker Symbol (e.g., MSFT, AAPL)",
         "MSFT",
@@ -239,7 +317,6 @@ def main_app():
             st.session_state['analysis_ticker'] = ticker_input
             st.session_state['run_search'] = True
             st.session_state['selected_tab'] = "SEC Filings Analyzer"
-            # Clear the cache for the fetching function just in case
             st.cache_data.clear() 
         else:
             st.sidebar.warning("Please enter a ticker symbol.")
@@ -280,47 +357,78 @@ def main_app():
             if error_message:
                 st.error(error_message)
                 st.session_state['run_search'] = False
+                st.session_state.pop('filings_df', None) # Clear previous data
                 return
 
             # 3. Display Filings in a Scrollable, Selectable Dataframe
             if filings_list:
                 df = pd.DataFrame(filings_list)
+                st.session_state['filings_df'] = df # Store for later use
                 
-                # Drop the URL column for the display, but keep it for selection logic
                 df_display = df.drop(columns=['URL', 'Accession No.'])
                 
                 st.markdown("**Click a row below to select a filing.**")
                 
-                # Use st.dataframe with selection enabled for easy scrolling and selection
                 selected_rows = st.dataframe(
                     df_display, 
-                    height=400, # Set height to make it scrollable
+                    height=400, 
                     use_container_width=True,
                     hide_index=True,
                     column_order=("Type", "Date", "Filing Name"),
-                    selection_mode="single-row"
+                    selection_mode="single-row",
+                    key="filings_dataframe"
                 )
 
-                # 4. Handle Selection
-                if selected_rows.selection and selected_rows.selection['rows']:
-                    selected_index = selected_rows.selection['rows'][0]
+                # --- NEW: Analysis Logic Trigger ---
+                
+                # Check for selected row (uses st.dataframe key)
+                selected_index = selected_rows.selection['rows'][0] if selected_rows.selection and selected_rows.selection['rows'] else None
+
+                if selected_index is not None:
                     selected_filing = df.iloc[selected_index]
-                    
+                    st.session_state['selected_filing_url'] = selected_filing['URL']
+                    st.session_state['selected_filing_name'] = selected_filing['Filing Name']
+
+                # Display analysis section if a filing is selected OR if a previous selection exists
+                if st.session_state.get('selected_filing_url'):
                     st.markdown("---")
-                    st.subheader(f"Selected Filing: {selected_filing['Filing Name']}")
+                    st.subheader(f"Analyze: {st.session_state['selected_filing_name']}")
                     
-                    # Provide direct link to the filing
                     st.markdown(
-                        f"**View Full Filing:** [{selected_filing['Accession No.']}]({selected_filing['URL']})"
+                        f"**View Full Filing:** [{selected_filing['Accession No.'] if selected_index is not None else 'Link'}]({st.session_state['selected_filing_url']})"
+                    )
+
+                    analysis_prompt = st.text_area(
+                        "**AI Analysis Prompt (Gemini API):**",
+                        value="Summarize the key events and material impacts discussed in the 'Management's Discussion and Analysis' section.",
+                        height=100
                     )
                     
-                    # Placeholder for AI Analysis based on selection
-                    st.info(
-                        "**Next Step:** You can now integrate the Gemini API here to analyze the content of this specific filing! "
-                        "For example, you could ask the AI to summarize the 'Risk Factors' section."
-                    )
+                    # Store prompt in session state for rerun persistence
+                    st.session_state['analysis_prompt'] = analysis_prompt 
+
+                    if st.button("Run AI Analysis", key="run_ai_analysis"):
+                        st.session_state['analysis_result'] = ""
+                        
+                        with st.spinner(f"1/2: Scraping content from {st.session_state['selected_filing_name']}..."):
+                            filing_content, scrape_error = scrape_filing_content(st.session_state['selected_filing_url'])
+                        
+                        if scrape_error:
+                            st.error(scrape_error)
+                        elif filing_content:
+                            with st.spinner(f"2/2: Sending content to Gemini for analysis..."):
+                                analysis_text = analyze_filing_content(filing_content, analysis_prompt)
+                                st.session_state['analysis_result'] = analysis_text
+                        
+                        # Rerun to display result cleanly
+                        st.experimental_rerun() 
+
+                    # Display Analysis Result
+                    if 'analysis_result' in st.session_state and st.session_state['analysis_result']:
+                        st.markdown("### AI Analysis Result")
+                        st.markdown(st.session_state['analysis_result'])
+                
             else:
-                # This is the expected output if no matching filings were found
                 st.info(f"No recent 10-K, 10-Q, or 8-K filings found for {ticker_to_search} in the top 100 results.")
             
             # Reset flag
