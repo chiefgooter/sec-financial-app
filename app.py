@@ -149,49 +149,63 @@ def main_app():
     st.title("Integrated Financial Dashboard")
     st.markdown("---")
 
-    # --- Sidebar Navigation ---
+    # --- Sidebar Input Section (New Location) ---
+    st.sidebar.markdown("### SEC Filing Search")
+    
+    ticker_input = st.sidebar.text_input(
+        "Enter Ticker Symbol (e.g., MSFT, AAPL)",
+        "MSFT",
+        max_chars=5,
+        key="sidebar_ticker_input"
+    ).upper()
+    
+    # Check if the session state for the selected tab exists
+    if 'selected_tab' not in st.session_state:
+        st.session_state['selected_tab'] = "SEC Filings Analyzer"
+        
+    if st.sidebar.button("Analyze Filings", key="sidebar_analyze_button"):
+        if ticker_input:
+            st.session_state['analysis_ticker'] = ticker_input
+            st.session_state['run_analysis'] = True
+            # Set the selected tab to the Analyzer when the button is pressed
+            st.session_state['selected_tab'] = "SEC Filings Analyzer"
+        else:
+            st.sidebar.warning("Please enter a ticker symbol.")
+
+    # --- Sidebar Navigation (Below Input) ---
     st.sidebar.title("Navigation")
     
-    # We will use simple radio buttons for navigation until we implement multi-page
+    # We use the session state to control the initial value of the radio button
     selected_tab = st.sidebar.radio(
         "Go to",
         ("SEC Filings Analyzer", "Dashboard"),
-        index=0 # Start on the analyzer tab
+        index=0 if st.session_state['selected_tab'] == "SEC Filings Analyzer" else 1,
+        key="navigation_radio"
     )
+    # Update session state if the user changes the radio button
+    st.session_state['selected_tab'] = selected_tab
 
-    if selected_tab == "Dashboard":
+
+    if st.session_state['selected_tab'] == "Dashboard":
         st.header("Welcome to Your Dashboard")
-        st.info("Select 'SEC Filings Analyzer' from the sidebar to begin using the AI-powered tools.")
+        st.info("Select 'SEC Filings Analyzer' or use the search box above to begin using the AI-powered tools.")
         st.markdown("### User Information")
         # In a full Firebase integrated app, you'd show real user data here.
         st.code("Current App State: Python Streamlit Application")
 
-    elif selected_tab == "SEC Filings Analyzer":
+    elif st.session_state['selected_tab'] == "SEC Filings Analyzer":
         st.header("SEC Filings Analyzer")
         st.markdown("Use AI to quickly summarize the key risks and opportunities from the latest 10-K and 10-Q filings.")
-
-        # --- Input Section ---
-        ticker = st.text_input(
-            "Enter Ticker Symbol (e.g., MSFT, AAPL)",
-            "MSFT",
-            max_chars=5,
-            key="ticker_input"
-        ).upper()
-
-        if st.button("Analyze Filings", key="analyze_button"):
-            if ticker:
-                st.session_state['analysis_ticker'] = ticker
-                st.session_state['run_analysis'] = True
-            else:
-                st.warning("Please enter a ticker symbol.")
 
         # --- Analysis Execution and Display ---
         if 'run_analysis' in st.session_state and st.session_state['run_analysis']:
             st.markdown("---")
-            st.subheader(f"Analysis for: {st.session_state['analysis_ticker']}")
+            # Ensure we have a ticker to analyze, default to MSFT if none has been searched yet
+            ticker_to_analyze = st.session_state.get('analysis_ticker', 'MSFT')
+            st.subheader(f"Analysis for: {ticker_to_analyze}")
 
             # Run the analysis function
-            summary_text, sources = analyze_filings(st.session_state['analysis_ticker'])
+            summary_text, sources = analyze_filings(ticker_to_analyze)
             
             # Display Summary
             st.markdown("### AI Summary of MD&A")
@@ -207,6 +221,9 @@ def main_app():
             
             # Reset flag
             st.session_state['run_analysis'] = False
+        else:
+            # Display initial guidance when the tab is first selected or analysis hasn't run
+            st.info("Enter a stock ticker in the sidebar and click 'Analyze Filings' to view the summary.")
 
 
 if __name__ == "__main__":
