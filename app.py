@@ -71,15 +71,15 @@ def search_filings(ticker):
     if not client:
         return "Error: Gemini client is not initialized.", []
 
-    # New prompt: asks for a list but also includes the link to the full filing history
+    # MODIFIED SYSTEM PROMPT: Removed the introductory sentence that was causing clutter.
     system_prompt = (
         "Act as an expert financial researcher. Your response must begin with a Markdown hyperlink "
         "to the company's full filing history on the SEC EDGAR website, using the following template: "
         "'[View all SEC Filings for {TICKER} on EDGAR](https://www.sec.gov/edgar/browse/?CIK={TICKER})'. "
-        "After this link, list the filing type, the filing date, and a direct URL link for the most recent "
+        "Directly following this link, list the filing type, the filing date, and a direct URL link for the most recent "
         "10-K, 10-Q, and 8-K SEC filings you can find, up to a maximum of 10 total. "
-        "Format the list as a Markdown list where each item is a hyperlink using the filing name and date as the display text. "
-        "Example list item format: * [10-Q filed 2024-10-25](http://example.com/url)."
+        "Format the list as a single, numbered Markdown list where each item is a hyperlink using the filing name and date as the display text. "
+        "Example list item format: 1. [10-Q filed 2024-10-25](http://example.com/url)."
     )
     user_query = f"Provide a comprehensive list of recent SEC filings (10-K, 10-Q, 8-K) and the full EDGAR search link for {ticker}."
 
@@ -205,14 +205,14 @@ def main_app():
             st.markdown("---")
             # Ensure we have a ticker to analyze, default to MSFT if none has been searched yet
             ticker_to_search = st.session_state.get('analysis_ticker', 'MSFT')
-            st.subheader(f"Recent Filings for: {ticker_to_search}")
+            st.subheader(f"Recent Filings for: {ticker_to_search}") # Keep this header clear and distinct
 
-            # Run the search function (renamed from analyze_filings)
+            # Run the search function
             search_results_markdown, sources = search_filings(ticker_to_search)
             
             # Display Search Results
-            st.markdown("### Filings List")
-            st.markdown(search_results_markdown) # Use st.markdown to render the Markdown list/links
+            st.header("Filings List") # Changed from subheader to header for clearer separation
+            st.markdown(search_results_markdown) # This will render the single block of Markdown text
 
             # Display Sources (Citations)
             st.markdown("### Grounding Sources (Sources used to generate the list)")
