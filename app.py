@@ -98,19 +98,30 @@ def analyze_filings(ticker):
             # Extract generated text
             generated_text = response.text
 
-            # Extract grounding sources (citations) - FIX APPLIED HERE
+            # --- NEW ROBUST SOURCE EXTRACTION LOGIC ---
             sources = []
             candidate = response.candidates[0] if response.candidates else None
+            
+            if candidate and candidate.grounding_metadata:
+                # Use .to_dict() to convert the object to a standard Python dictionary
+                # This makes accessing potentially missing fields safer.
+                metadata_dict = candidate.grounding_metadata.to_dict()
+                
+                # Check for the key using .get()
+                attributions = metadata_dict.get('grounding_attributions', [])
+                
+                for attribution in attributions:
+                    # Check for nested web data
+                    web_data = attribution.get('web', {})
+                    uri = web_data.get('uri')
+                    title = web_data.get('title')
 
-            if candidate and candidate.grounding_metadata and candidate.grounding_metadata.grounding_attributions:
-                for attribution in candidate.grounding_metadata.grounding_attributions:
-                    # Safely access web attribution details
-                    web_data = getattr(attribution, 'web', None)
-                    if web_data and getattr(web_data, 'uri', None):
+                    if uri:
                         sources.append({
-                            'uri': web_data.uri,
-                            'title': web_data.title or 'External Source'
+                            'uri': uri,
+                            'title': title or 'External Source'
                         })
+            # --- END NEW ROBUST SOURCE EXTRACTION LOGIC ---
             
             return generated_text, sources
 
@@ -123,6 +134,9 @@ def analyze_filings(ticker):
                 st.error(f"API Error: Failed after {retries} attempts. {e}")
                 return "Analysis failed due to an API connection error.", []
         except Exception as e:
+            # We catch any other error here, including the original
+            # 'GroundingMetadata' object has no attribute 'grounding_attributions'
+            # if it somehow still slips through the logic above.
             st.error(f"An unexpected error occurred: {e}")
             return "Analysis failed due to an unexpected error.", []
             
