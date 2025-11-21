@@ -97,9 +97,9 @@ def fetch_sec_filings(ticker, limit=100, max_retries=5):
     final_error = None
     for attempt in range(max_retries):
         try:
-            # Add a significantly longer delay for sequential requests to respect SEC throttling
-            # New formula: 1.0s base + 3s * attempt number
-            wait_time = 1.0 + 3 * attempt 
+            # Increased delay significantly to respect aggressive SEC rate limiting.
+            # Base 5 seconds + 5 seconds per attempt.
+            wait_time = 5.0 + 5 * attempt 
             st.toast(f"Attempt {attempt + 1}/{max_retries}: Waiting {wait_time:.1f}s before fetching filings.", icon="⏳")
             time.sleep(wait_time) 
             
