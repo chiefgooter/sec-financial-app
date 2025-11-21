@@ -66,10 +66,10 @@ h1, h2, h3 {
 # --- Core Search Function (Direct SEC EDGAR API) ---
 
 @st.cache_data(ttl=3600, show_spinner="Fetching structured SEC Filings data...")
-def fetch_sec_filings(ticker, limit=100, max_retries=3):
+def fetch_sec_filings(ticker, limit=100, max_retries=5): # Increased max_retries to 5
     """
     Fetches the CIK and then the last 100 recent filings (10-K, 10-Q, 8-K, S-1, S-3) 
-    directly from the SEC's EDGAR API, including retry logic for malformed data.
+    directly from the SEC's EDGAR API, including robust retry logic for malformed data.
     """
     # SEC requires a user-agent header
     headers = {'User-Agent': 'FinancialDashboardApp / myname@example.com'} 
@@ -98,7 +98,9 @@ def fetch_sec_filings(ticker, limit=100, max_retries=3):
     for attempt in range(max_retries):
         try:
             # Add a small delay for sequential requests (doubled on each attempt)
-            time.sleep(0.5 + 2 * attempt) 
+            wait_time = 0.5 + 2 * attempt
+            st.toast(f"Fetching filings... Attempt {attempt + 1}/{max_retries}. Waiting {wait_time:.1f}s.", icon="⏳")
+            time.sleep(wait_time) 
             
             filings_url = f"https://data.sec.gov/submissions/CIK{cik_number}.json"
             
@@ -121,16 +123,30 @@ def fetch_sec_filings(ticker, limit=100, max_retries=3):
             filing_types = filings.get('type', [])
             accession_numbers = filings.get('accessionNumber', [])
 
+            # CRITICAL CHECK: If filing_types is missing (the root cause of the previous error), retry.
+            if not filing_types:
+                current_error = (f"SEC API Error: The list of filing types was missing or empty. "
+                                f"Filings lengths found: Dates={len(filing_dates)}, Types=0, Accession={len(accession_numbers)}. Retrying...")
+                
+                if attempt < max_retries - 1:
+                    # Update final_error for diagnostic purposes if all retries fail, but continue looping
+                    final_error = current_error 
+                    continue # Explicitly retry
+                else:
+                    final_error = current_error
+                    break # Stop retrying
+
             # The length of the lists should be the same. Use the shortest length for safety.
             num_filings = min(len(filing_dates), len(filing_types), len(accession_numbers))
             
             if num_filings == 0:
-                # This is the exact error scenario we are trying to fix (Types=0)
+                # This should only happen if all lists are 0, which is less likely than Types=0, 
+                # but we keep the check for completeness.
                 current_error = (f"SEC API Error: Found company data for {ticker}, but zero filings were processed. "
                                 f"Filings lengths found: Dates={len(filing_dates)}, Types={len(filing_types)}, Accession={len(accession_numbers)}.")
                 
                 if attempt < max_retries - 1:
-                    st.toast(f"Filing data malformed (Attempt {attempt + 1}/{max_retries}). Retrying in {2 * (attempt + 1)}s...")
+                    final_error = current_error
                     continue # Retry
                 else:
                     final_error = current_error
@@ -164,20 +180,20 @@ def fetch_sec_filings(ticker, limit=100, max_retries=3):
             
             if not recent_filings:
                 # If we successfully parsed the data but the filtered list is empty
-                return [], f"Found data for {ticker}, but no 10-K, 10-Q, 8-K, S-1, or S-3 filings were in the top {limit} results."
+                return [], f"Found data for {ticker}, but no 10-K, 10-Q, or 8-K filings were in the top {limit} results."
             
             # Successful retrieval and parsing
             return recent_filings, None
     
         except requests.exceptions.HTTPError as e:
-            # Critical error like 403 or 404, usually means a block or bad ticker. Don't retry.
+            # Critical error like 403 or 404. Don't retry, just fail with the error.
             return [], f"SEC API HTTP Error: {e}. The SEC may be blocking the request or the ticker may be invalid."
         
         except json.JSONDecodeError as e:
-            # Response was not valid JSON. Likely a rate limit or server issue. Retry if possible.
+            # Response was not valid JSON. Likely a severe rate limit. Retry if possible.
             current_error = f"SEC API Error: Could not decode JSON response. Status: {filings_response.status_code if 'filings_response' in locals() else 'N/A'}."
             if attempt < max_retries - 1:
-                st.toast(f"JSON Decode Error (Attempt {attempt + 1}/{max_retries}). Retrying in {2 * (attempt + 1)}s...")
+                final_error = current_error
                 continue
             else:
                 final_error = current_error
@@ -187,7 +203,7 @@ def fetch_sec_filings(ticker, limit=100, max_retries=3):
             # General unexpected error. Retry if possible.
             current_error = f"An unexpected error occurred during SEC data fetching: {type(e).__name__} - {e}"
             if attempt < max_retries - 1:
-                st.toast(f"General Error (Attempt {attempt + 1}/{max_retries}). Retrying in {2 * (attempt + 1)}s...")
+                final_error = current_error
                 continue
             else:
                 final_error = current_error
