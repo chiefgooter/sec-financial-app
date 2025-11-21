@@ -19,6 +19,7 @@ st.set_page_config(
 # --- Initialize Gemini Client ---
 # The API Key is assumed to be set as an environment variable or via Streamlit secrets
 try:
+    # Use st.secrets to access the API key from the .streamlit/secrets.toml file
     if "GEMINI_API_KEY" in st.secrets:
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     else:
@@ -92,6 +93,9 @@ def fetch_sec_filings(ticker, limit=100):
         if not cik_number:
             return [], f"SEC API Error: Could not find CIK for ticker {ticker}. Please verify the ticker symbol."
 
+        # Add a small delay to mitigate sequential SEC API throttling
+        time.sleep(0.5) 
+        
         # 2. Get Filings using the CIK
         filings_url = f"https://data.sec.gov/submissions/CIK{cik_number}.json"
         
@@ -118,10 +122,8 @@ def fetch_sec_filings(ticker, limit=100):
         num_filings = min(len(filing_dates), len(filing_types), len(accession_numbers))
         
         if num_filings == 0:
-            # --- START FIX: More detailed error message ---
              return [], (f"SEC API Error: Found company data for {ticker}, but zero filings were processed. "
                          f"Filings lengths found: Dates={len(filing_dates)}, Types={len(filing_types)}, Accession={len(accession_numbers)}.")
-            # --- END FIX ---
         
         # 3. Iterate and Construct Filing Objects
         for i in range(num_filings):
@@ -179,6 +181,7 @@ def main_app():
     # --- Sidebar Input Section ---
     st.sidebar.markdown("### SEC Filing Search")
     
+    # Use MSFT as the default input for convenience
     ticker_input = st.sidebar.text_input(
         "Enter Ticker Symbol (e.g., MSFT, AAPL)",
         "MSFT",
@@ -232,9 +235,6 @@ def main_app():
             if error_message:
                 st.error(error_message)
                 st.session_state['run_search'] = False
-                # If the error is not about finding filings, log it.
-                if "no 10-K, 10-Q, 8-K" not in error_message:
-                    st.toast("Filing fetch error. Check console for details.", icon="⚠️")
                 return
 
             # 3. Display Filings in a Scrollable, Selectable Dataframe
@@ -275,7 +275,7 @@ def main_app():
                         "For example, you could ask the AI to summarize the 'Risk Factors' section."
                     )
             else:
-                # This is the expected output if no matching filings were found, and is handled above.
+                # This is the expected output if no matching filings were found
                 st.info(f"No recent 10-K, 10-Q, or 8-K filings found for {ticker_to_search} in the top 100 results.")
             
             # Reset flag
