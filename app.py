@@ -68,11 +68,11 @@ h1, h2, h3 {
 
 # --- Core Search Function (Direct SEC EDGAR API) ---
 
-# This function remains unchanged, as the issue is external (SEC rate limit)
-def fetch_sec_filings(ticker, limit=100, max_retries=5): 
+@st.cache_data(show_spinner=False)
+def fetch_sec_filings(ticker, limit=100, max_retries=5, all_filings=False): 
     """
-    Fetches the CIK and then the last 100 recent filings (10-K, 10-Q, 8-K, S-1, S-3) 
-    directly from the SEC's EDGAR API, including robust retry logic for malformed data.
+    Fetches the CIK and then recent filings directly from the SEC's EDGAR API.
+    If all_filings is True, it returns the complete list of recent filings without filtering.
     """
     # SEC requires a user-agent header
     headers = {'User-Agent': 'FinancialDashboardApp / myname@example.com'} 
@@ -156,8 +156,11 @@ def fetch_sec_filings(ticker, limit=100, max_retries=5):
             for i in range(num_filings):
                 filing_type = filing_types[i]
                 
-                # Filter to common types and respect the limit
-                if filing_type in ['10-K', '10-Q', '8-K', 'S-3', 'S-1'] and len(recent_filings) < limit:
+                # Filtering logic differs based on 'all_filings' flag
+                is_report_type = filing_type in ['10-K', '10-Q', '8-K', 'S-3', 'S-1']
+                should_add_filing = (all_filings or is_report_type) and len(recent_filings) < limit
+                
+                if should_add_filing:
                     
                     accession_number = accession_numbers[i]
                     filing_date = filing_dates[i]
@@ -179,7 +182,11 @@ def fetch_sec_filings(ticker, limit=100, max_retries=5):
                     })
             
             if not recent_filings:
-                return [], f"Found data for {ticker}, but no 10-K, 10-Q, or 8-K filings were in the top {limit} results."
+                # Adjust info message based on whether filtering occurred
+                if all_filings:
+                     return [], f"Found data for {ticker}, but no filings were processed in the top {limit} results."
+                else:
+                    return [], f"Found data for {ticker}, but no 10-K, 10-Q, or 8-K filings were in the top {limit} results."
             
             return recent_filings, None
     
@@ -207,7 +214,7 @@ def fetch_sec_filings(ticker, limit=100, max_retries=5):
     return [], final_error
 
 
-# --- NEW: Scraping and Analysis Functions ---
+# --- Scraping and Analysis Functions ---
 
 def scrape_filing_content(filing_url):
     """Fetches and cleans the text content from the main filing document."""
@@ -295,24 +302,28 @@ def analyze_filing_content(content, analysis_prompt):
 # --- Streamlit App Layout ---
 
 def main_app():
-    # ... (rest of main_app setup remains the same) ...
     st.title("Integrated Financial Dashboard")
     st.markdown("---")
 
-    # --- Sidebar Input Section ---
-    st.sidebar.markdown("### SEC Filing Search")
-    
-    ticker_input = st.sidebar.text_input(
-        "Enter Ticker Symbol (e.g., MSFT, AAPL)",
-        "MSFT",
-        max_chars=5,
-        key="sidebar_ticker_input"
-    ).upper()
-    
+    # --- Session State Initialization ---
     if 'selected_tab' not in st.session_state:
         st.session_state['selected_tab'] = "SEC Filings Analyzer"
-        
-    if st.sidebar.button("Search Filings", key="sidebar_analyze_button"):
+    if 'all_filings_ticker' not in st.session_state:
+        st.session_state['all_filings_ticker'] = "MSFT" # Default for the new browser
+
+
+    # --- Sidebar Input Section ---
+    st.sidebar.markdown("### Search & Analysis")
+    
+    # 1. Ticker Input for Targeted Analyzer (stays the same)
+    ticker_input = st.sidebar.text_input(
+        "Analyzer Ticker (10-K, 10-Q, 8-K)",
+        "MSFT",
+        max_chars=5,
+        key="sidebar_analyzer_ticker_input"
+    ).upper()
+    
+    if st.sidebar.button("Search & Analyze", key="sidebar_analyze_button"):
         if ticker_input:
             st.session_state['analysis_ticker'] = ticker_input
             st.session_state['run_search'] = True
@@ -321,49 +332,71 @@ def main_app():
         else:
             st.sidebar.warning("Please enter a ticker symbol.")
 
+    st.sidebar.markdown("---")
+    
+    # 2. Ticker Input for All Filings Browser (NEW)
+    st.sidebar.markdown("### All Filings Browser")
+    all_filings_ticker_input = st.sidebar.text_input(
+        "Browser Ticker (All Types)",
+        st.session_state['all_filings_ticker'],
+        max_chars=5,
+        key="sidebar_all_filings_ticker_input"
+    ).upper()
+    
+    if st.sidebar.button("Load All Filings", key="sidebar_load_all_button"):
+        if all_filings_ticker_input:
+            st.session_state['all_filings_ticker'] = all_filings_ticker_input
+            st.session_state['run_all_filings_search'] = True
+            st.session_state['selected_tab'] = "All Filings Browser"
+            st.cache_data.clear() 
+        else:
+            st.sidebar.warning("Please enter a ticker symbol.")
+            
+    st.sidebar.markdown("---")
+
     # --- Sidebar Navigation (Below Input) ---
     st.sidebar.title("Navigation")
     
     selected_tab = st.sidebar.radio(
         "Go to",
-        ("SEC Filings Analyzer", "Dashboard"),
-        index=0 if st.session_state['selected_tab'] == "SEC Filings Analyzer" else 1,
+        ("SEC Filings Analyzer", "All Filings Browser", "Dashboard"),
+        index=("SEC Filings Analyzer", "All Filings Browser", "Dashboard").index(st.session_state['selected_tab']),
         key="navigation_radio"
     )
     st.session_state['selected_tab'] = selected_tab
 
-
+    
+    # --- Main Content: Dashboard ---
     if st.session_state['selected_tab'] == "Dashboard":
         st.header("Welcome to Your Dashboard")
-        st.info("Select 'SEC Filings Analyzer' or use the search box above to begin using the AI-powered tools.")
+        st.info("Select a tool from the left sidebar to begin using the financial dashboard.")
         st.markdown("### User Information")
         st.code("Current App State: Python Streamlit Application")
 
+    # --- Main Content: Analyzer Tab ---
     elif st.session_state['selected_tab'] == "SEC Filings Analyzer":
-        st.header("SEC Filings Search Results")
-        st.markdown("Select a filing from the list below to analyze or view.")
+        st.header("SEC Filings Analyzer (10-K, 10-Q, 8-K)")
+        st.markdown("Select a major regulatory filing from the list below to perform an AI analysis.")
 
-        # --- Search Execution and Display ---
+        # --- Search Execution and Display (Same logic as before) ---
         if 'run_search' in st.session_state and st.session_state['run_search']:
             st.markdown("---")
             ticker_to_search = st.session_state.get('analysis_ticker', 'MSFT')
-            st.subheader(f"Recent Filings (up to 100) for: {ticker_to_search}")
+            st.subheader(f"Recent Filings (Filtered) for: {ticker_to_search}")
 
-            # 1. Fetch Filings (Now without caching and inside a spinner)
-            with st.spinner("Fetching structured SEC Filings data (with retry logic)..."):
+            with st.spinner("Fetching filtered SEC Filings data (with retry logic)..."):
+                # Call fetch_sec_filings with all_filings=False (default)
                 filings_list, error_message = fetch_sec_filings(ticker_to_search, limit=100)
             
-            # 2. Handle Errors
             if error_message:
                 st.error(error_message)
                 st.session_state['run_search'] = False
-                st.session_state.pop('filings_df', None) # Clear previous data
+                st.session_state.pop('filings_df', None) 
                 return
 
-            # 3. Display Filings in a Scrollable, Selectable Dataframe
             if filings_list:
                 df = pd.DataFrame(filings_list)
-                st.session_state['filings_df'] = df # Store for later use
+                st.session_state['filings_df'] = df 
                 
                 df_display = df.drop(columns=['URL', 'Accession No.'])
                 
@@ -376,12 +409,9 @@ def main_app():
                     hide_index=True,
                     column_order=("Type", "Date", "Filing Name"),
                     selection_mode="single-row",
-                    key="filings_dataframe"
+                    key="analyzer_filings_dataframe"
                 )
 
-                # --- NEW: Analysis Logic Trigger ---
-                
-                # Check for selected row (uses st.dataframe key)
                 selected_index = selected_rows.selection['rows'][0] if selected_rows.selection and selected_rows.selection['rows'] else None
 
                 if selected_index is not None:
@@ -389,22 +419,22 @@ def main_app():
                     st.session_state['selected_filing_url'] = selected_filing['URL']
                     st.session_state['selected_filing_name'] = selected_filing['Filing Name']
 
-                # Display analysis section if a filing is selected OR if a previous selection exists
                 if st.session_state.get('selected_filing_url'):
                     st.markdown("---")
-                    st.subheader(f"Analyze: {st.session_state['selected_filing_name']}")
+                    st.subheader(f"Analyze: {st.session_state.get('selected_filing_name', 'No Filing Selected')}")
                     
+                    # Ensure the correct row info is used for the link display
+                    link_info = df.iloc[selected_index] if selected_index is not None else {'Accession No.': 'Link', 'URL': st.session_state['selected_filing_url']}
                     st.markdown(
-                        f"**View Full Filing:** [{selected_filing['Accession No.'] if selected_index is not None else 'Link'}]({st.session_state['selected_filing_url']})"
+                        f"**View Full Filing:** [{link_info['Accession No.']}]({link_info['URL']})"
                     )
 
                     analysis_prompt = st.text_area(
                         "**AI Analysis Prompt (Gemini API):**",
-                        value="Summarize the key events and material impacts discussed in the 'Management's Discussion and Analysis' section.",
+                        value=st.session_state.get('analysis_prompt', "Summarize the key events and material impacts discussed in the 'Management's Discussion and Analysis' section."),
                         height=100
                     )
                     
-                    # Store prompt in session state for rerun persistence
                     st.session_state['analysis_prompt'] = analysis_prompt 
 
                     if st.button("Run AI Analysis", key="run_ai_analysis"):
@@ -420,10 +450,8 @@ def main_app():
                                 analysis_text = analyze_filing_content(filing_content, analysis_prompt)
                                 st.session_state['analysis_result'] = analysis_text
                         
-                        # Rerun to display result cleanly
                         st.experimental_rerun() 
 
-                    # Display Analysis Result
                     if 'analysis_result' in st.session_state and st.session_state['analysis_result']:
                         st.markdown("### AI Analysis Result")
                         st.markdown(st.session_state['analysis_result'])
@@ -431,9 +459,55 @@ def main_app():
             else:
                 st.info(f"No recent 10-K, 10-Q, or 8-K filings found for {ticker_to_search} in the top 100 results.")
             
-            # Reset flag
             st.session_state['run_search'] = False
+
+    # --- Main Content: All Filings Browser Tab (NEW) ---
+    elif st.session_state['selected_tab'] == "All Filings Browser":
+        st.header("All SEC Filings Browser")
+        st.markdown("Retrieve the full, unfiltered list of recent filings for a given ticker.")
+
+        if 'run_all_filings_search' in st.session_state and st.session_state['run_all_filings_search']:
+            st.markdown("---")
+            ticker_to_search = st.session_state.get('all_filings_ticker', 'MSFT')
+            st.subheader(f"All Recent Filings (up to 1000) for: {ticker_to_search}")
+
+            with st.spinner("Fetching ALL recent SEC Filings data (with retry logic)..."):
+                # Call fetch_sec_filings with all_filings=True
+                filings_list, error_message = fetch_sec_filings(ticker_to_search, limit=1000, all_filings=True)
+            
+            if error_message:
+                st.error(error_message)
+                st.session_state['run_all_filings_search'] = False
+                return
+
+            if filings_list:
+                # Use a new session state key for this data
+                df_all = pd.DataFrame(filings_list)
+                st.session_state['all_filings_df'] = df_all
+                
+                # We show all columns except the URL and Accession No. for a cleaner view
+                df_display_all = df_all.drop(columns=['URL', 'Accession No.'])
+                
+                st.markdown(f"**Found {len(df_display_all)} total filings.**")
+                
+                st.dataframe(
+                    df_display_all, 
+                    height=600, # Taller table for more data
+                    use_container_width=True,
+                    hide_index=True,
+                    column_order=("Type", "Date", "Filing Name"),
+                    key="all_filings_dataframe"
+                )
+                
+                st.info("To view or analyze a specific filing, switch back to the 'SEC Filings Analyzer' tab and search for the ticker.")
+
+            else:
+                st.info(f"No recent filings found for {ticker_to_search}.")
+            
+            st.session_state['run_all_filings_search'] = False
 
 
 if __name__ == "__main__":
+    # Ensure cache is cleared on startup if needed, though Streamlit handles this usually
+    # st.cache_data.clear()
     main_app()
