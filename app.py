@@ -98,30 +98,32 @@ def analyze_filings(ticker):
             # Extract generated text
             generated_text = response.text
 
-            # --- NEW ROBUST SOURCE EXTRACTION LOGIC ---
+            # --- FINAL ROBUST SOURCE EXTRACTION LOGIC (using getattr) ---
             sources = []
             candidate = response.candidates[0] if response.candidates else None
             
-            if candidate and candidate.grounding_metadata:
-                # Use .to_dict() to convert the object to a standard Python dictionary
-                # This makes accessing potentially missing fields safer.
-                metadata_dict = candidate.grounding_metadata.to_dict()
+            if candidate:
+                grounding_metadata = getattr(candidate, 'grounding_metadata', None)
                 
-                # Check for the key using .get()
-                attributions = metadata_dict.get('grounding_attributions', [])
-                
-                for attribution in attributions:
-                    # Check for nested web data
-                    web_data = attribution.get('web', {})
-                    uri = web_data.get('uri')
-                    title = web_data.get('title')
+                if grounding_metadata:
+                    # Safely retrieve the attributions list
+                    attributions = getattr(grounding_metadata, 'grounding_attributions', [])
+                    
+                    for attribution in attributions:
+                        # Safely retrieve the 'web' object
+                        web_data = getattr(attribution, 'web', None)
+                        
+                        if web_data:
+                            # Safely retrieve uri and title
+                            uri = getattr(web_data, 'uri', None)
+                            title = getattr(web_data, 'title', 'External Source')
 
-                    if uri:
-                        sources.append({
-                            'uri': uri,
-                            'title': title or 'External Source'
-                        })
-            # --- END NEW ROBUST SOURCE EXTRACTION LOGIC ---
+                            if uri:
+                                sources.append({
+                                    'uri': uri,
+                                    'title': title
+                                })
+            # --- END FINAL ROBUST SOURCE EXTRACTION LOGIC ---
             
             return generated_text, sources
 
@@ -134,9 +136,7 @@ def analyze_filings(ticker):
                 st.error(f"API Error: Failed after {retries} attempts. {e}")
                 return "Analysis failed due to an API connection error.", []
         except Exception as e:
-            # We catch any other error here, including the original
-            # 'GroundingMetadata' object has no attribute 'grounding_attributions'
-            # if it somehow still slips through the logic above.
+            # This catch-all ensures we display the specific error, even if it's new
             st.error(f"An unexpected error occurred: {e}")
             return "Analysis failed due to an unexpected error.", []
             
