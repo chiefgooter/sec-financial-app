@@ -65,8 +65,8 @@ h1, h2, h3 {
 
 # --- Core Search Function (Direct SEC EDGAR API) ---
 
-@st.cache_data(ttl=3600, show_spinner="Fetching structured SEC Filings data...")
-def fetch_sec_filings(ticker, limit=100, max_retries=5): # Increased max_retries to 5
+# REMOVED @st.cache_data - we rely on the retry loop for reliability
+def fetch_sec_filings(ticker, limit=100, max_retries=5): 
     """
     Fetches the CIK and then the last 100 recent filings (10-K, 10-Q, 8-K, S-1, S-3) 
     directly from the SEC's EDGAR API, including robust retry logic for malformed data.
@@ -99,7 +99,7 @@ def fetch_sec_filings(ticker, limit=100, max_retries=5): # Increased max_retries
         try:
             # Add a small delay for sequential requests (doubled on each attempt)
             wait_time = 0.5 + 2 * attempt
-            st.toast(f"Fetching filings... Attempt {attempt + 1}/{max_retries}. Waiting {wait_time:.1f}s.", icon="⏳")
+            st.toast(f"Attempt {attempt + 1}/{max_retries}: Waiting {wait_time:.1f}s before fetching filings.", icon="⏳")
             time.sleep(wait_time) 
             
             filings_url = f"https://data.sec.gov/submissions/CIK{cik_number}.json"
@@ -238,6 +238,8 @@ def main_app():
             st.session_state['analysis_ticker'] = ticker_input
             st.session_state['run_search'] = True
             st.session_state['selected_tab'] = "SEC Filings Analyzer"
+            # Clear the cache for the fetching function just in case
+            st.cache_data.clear() 
         else:
             st.sidebar.warning("Please enter a ticker symbol.")
 
@@ -269,9 +271,9 @@ def main_app():
             ticker_to_search = st.session_state.get('analysis_ticker', 'MSFT')
             st.subheader(f"Recent Filings (up to 100) for: {ticker_to_search}")
 
-            # 1. Fetch Filings
-            # The retry logic is now inside this function
-            filings_list, error_message = fetch_sec_filings(ticker_to_search, limit=100)
+            # 1. Fetch Filings (Now without caching and inside a spinner)
+            with st.spinner("Fetching structured SEC Filings data (with retry logic)..."):
+                filings_list, error_message = fetch_sec_filings(ticker_to_search, limit=100)
             
             # 2. Handle Errors
             if error_message:
